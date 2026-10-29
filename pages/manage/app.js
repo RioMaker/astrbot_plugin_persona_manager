@@ -104,8 +104,9 @@ async function action(actionName, payload = {}, { replaceCore = false } = {}) {
 function renderState(replaceCore) {
   const status = object(state.status);
   const isPaused = paused();
-  byId("learning-status").textContent = isPaused ? "学习已暂停" : "学习已开启";
-  byId("learning-status").className = `status-pill ${isPaused ? "paused" : "running"}`;
+  const disabledByConfig = status.enabled === false || status.learning_enabled === false;
+  byId("learning-status").textContent = disabledByConfig ? "配置已关闭学习" : isPaused ? "学习已暂停" : "学习已开启";
+  byId("learning-status").className = `status-pill ${isPaused || disabledByConfig ? "paused" : "running"}`;
   byId("learning-toggle").textContent = isPaused ? "恢复学习" : "暂停学习";
   byId("status-detail").textContent = string(status);
   byId("persona-caption").textContent = selectedPersona ? `正在管理：${selectedPersona}` : "后端未返回人格 ID，请检查插件配置。";
@@ -308,9 +309,11 @@ function finishDialog(result) {
 
 async function correctMemory(memory) {
   if (memory.status === "corrected") return;
-  const result = await ask({ title: "纠正记忆", description: "填写明确的新内容，并核对进度状态；时间不确定时请保留不确定性。", submit: "保存修正", edit: true, content: recordText(memory), state: memory.state, time: string(first(memory.time_text, memory.time_expression)) });
+  const originalTime = string(first(memory.time_text, memory.time_expression)).trim();
+  const result = await ask({ title: "纠正记忆", description: "核对正文和状态。时间未修改或留空时保留原时间；要更改时间，建议填写明确日期。", submit: "保存修正", edit: true, content: recordText(memory), state: memory.state, time: originalTime });
   if (!result) return;
-  await perform(() => action("memory_correct", { memory_id: recordId(memory), content: result.content, state: result.state, time_expression: result.time }), "记忆已修正。");
+  const changedTime = result.time && result.time !== originalTime ? result.time : null;
+  await perform(() => action("memory_correct", { memory_id: recordId(memory), content: result.content, state: result.state, time_expression: changedTime }), "记忆已修正。");
 }
 
 async function forgetMemory(memory) {

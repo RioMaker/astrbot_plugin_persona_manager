@@ -12,7 +12,7 @@ from datetime import datetime
 from pathlib import Path
 from typing import Callable
 
-from .temporal import BEIJING, resolve_time
+from .temporal import BEIJING, is_past_reference, resolve_time
 
 
 def _json(value) -> str:
@@ -79,6 +79,12 @@ class Store:
         if "extra" not in {x[1] for x in self.db.execute("PRAGMA table_info(sources)")}:
             self.db.execute(
                 "ALTER TABLE sources ADD COLUMN extra TEXT NOT NULL DEFAULT '{}'"
+            )
+        if "time_text" not in {
+            x[1] for x in self.db.execute("PRAGMA table_info(memories)")
+        }:
+            self.db.execute(
+                "ALTER TABLE memories ADD COLUMN time_text TEXT NOT NULL DEFAULT ''"
             )
         self.db.commit()
 
@@ -157,7 +163,7 @@ class Store:
             if source["purpose"] == "interaction":
                 promoted = self.db.execute(
                     "UPDATE sources SET purpose='interaction',status='pending' WHERE id=? AND purpose='observation' "
-                    "AND status NOT IN ('forgotten','expired') AND persona_id=? AND user_id=? AND scope_key=?",
+                    "AND status NOT IN ('forgotten','expired','reviewed') AND persona_id=? AND user_id=? AND scope_key=?",
                     (
                         source_id,
                         source["persona_id"],
@@ -182,7 +188,7 @@ class Store:
             return self._source_dict(row) if row else None
 
     def pending_sources(
-        self, purpose=None, *, scope_key=None, persona_id=None, limit=50
+        self, purpose=None, *, scope_key=None, persona_id=None, limit=50, after=None
     ) -> list[dict]:
         sql, args = "SELECT * FROM sources WHERE status='pending' AND text<>''", []
         for key, value in (
@@ -193,6 +199,9 @@ class Store:
             if value is not None:
                 sql += f" AND {key}=?"
                 args.append(value)
+        if after is not None:
+            sql += " AND (sent_at>? OR (sent_at=? AND id>?))"
+            args.extend((float(after[0]), float(after[0]), str(after[1])))
         sql += " ORDER BY sent_at,id LIMIT ?"
         args.append(max(0, min(int(limit), 1000)))
         with self._lock:
@@ -205,7 +214,7 @@ class Store:
             if epoch != self.epoch():
                 return False
             self.db.executemany(
-                "UPDATE sources SET status=? WHERE id=? AND status NOT IN ('forgotten','expired')",
+                "UPDATE sources SET status=? WHERE id=? AND status NOT IN ('forgotten','expired','reviewed')",
                 ((status, str(x)) for x in ids),
             )
             return True
@@ -217,7 +226,9 @@ class Store:
         ids = list(dict.fromkeys(str(x) for x in ids))
         rows = [self.get_source(x) for x in ids]
         if any(
-            not x or not x["text"] or x["status"] in {"forgotten", "expired"}
+            not x
+            or not x["text"]
+            or x["status"] in {"forgotten", "expired", "reviewed"}
             for x in rows
         ):
             return []
@@ -279,16 +290,32 @@ class Store:
                 ):
                     continue
                 source = max(sources, key=lambda x: (x["sent_at"], x["id"]))
-                resolved = resolve_time(proposal.get("time_text"), source["sent_at"])
+                time_text = proposal.get("time_text") or ""
+                if not isinstance(time_text, str) or len(time_text) > 100:
+                    continue
+                resolved = resolve_time(time_text, source["sent_at"])
                 # A plan is known now; its scheduled date is not the date its status becomes current.
                 effective = (
                     resolved["start"]
                     if resolved["start"] is not None
                     else source["sent_at"]
                 )
-                if state == "planned" or (
-                    resolved["precision"] == "day"
-                    and resolved["start"] <= source["sent_at"] < resolved["end"]
+                if (
+                    state == "planned"
+                    or (
+                        state == "cancelled"
+                        and (
+                            "计划" in content
+                            or (
+                                resolved["start"] is not None
+                                and resolved["start"] > source["sent_at"]
+                            )
+                        )
+                    )
+                    or (
+                        resolved["start"] is not None
+                        and resolved["start"] <= source["sent_at"] < resolved["end"]
+                    )
                 ):
                     effective = source["sent_at"]
                 source_ids = sorted(x["id"] for x in sources)
@@ -316,7 +343,7 @@ class Store:
                 cursor = self.db.execute(
                     "INSERT OR IGNORE INTO memories "
                     "(persona_id,user_id,kind,key,content,state,source_ids,source_group,source_sent_at,learned_at,"
-                    "event_start,event_end,precision,valid_from,corrects_id,fingerprint) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
+                    "event_start,event_end,precision,valid_from,corrects_id,fingerprint,time_text) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
                     (
                         source["persona_id"],
                         source["user_id"],
@@ -334,6 +361,7 @@ class Store:
                         effective,
                         corrects,
                         fingerprint,
+                        time_text,
                     ),
                 )
                 if cursor.rowcount:
@@ -363,7 +391,25 @@ class Store:
             )
             seen, output = set(), []
             for row in rows:
-                attribute = (row["kind"], row["key"])
+                # An undated historical statement is not a new current attribute.
+                # Checking content also protects pre-migration records without time_text.
+                if row["precision"] == "unknown":
+                    if row["time_text"] not in {"", "最近", "目前", "现在", "以后"}:
+                        continue
+                    if is_past_reference(row["time_text"] or row["content"]):
+                        continue
+                # Knowing a future plan must not erase what the person is doing now.
+                planning = row["state"] == "planned" or (
+                    row["state"] == "cancelled"
+                    and (
+                        "计划" in row["content"]
+                        or (
+                            row["event_start"] is not None
+                            and row["event_start"] > row["source_sent_at"]
+                        )
+                    )
+                )
+                attribute = (row["kind"], row["key"], planning)
                 if attribute not in seen:
                     output.append(self._memory_dict(row))
                     seen.add(attribute)
@@ -419,7 +465,7 @@ class Store:
                     json.loads(row["source_ids"])
                 ):
                     self.db.execute(
-                        "UPDATE memories SET content='',status='forgotten' WHERE id=?",
+                        "UPDATE memories SET content='',key='',time_text='',status='forgotten' WHERE id=?",
                         (row["id"],),
                     )
                     count += 1
@@ -465,7 +511,7 @@ class Store:
             self._bump_epoch()
             now = self.clock()
             # Editing an old description does not make that old state current again.
-            if time_text:
+            if time_text and time_text != row["time_text"]:
                 resolved = resolve_time(time_text, now)
                 effective = (
                     resolved["start"]
@@ -484,8 +530,8 @@ class Store:
             ).hexdigest()
             cursor = self.db.execute(
                 "INSERT INTO memories (persona_id,user_id,kind,key,content,state,source_ids,source_group,"
-                "source_sent_at,learned_at,event_start,event_end,precision,valid_from,corrects_id,fingerprint) "
-                "VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
+                "source_sent_at,learned_at,event_start,event_end,precision,valid_from,corrects_id,fingerprint,time_text) "
+                "VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
                 (
                     row["persona_id"],
                     row["user_id"],
@@ -503,10 +549,22 @@ class Store:
                     effective,
                     memory_id,
                     fingerprint,
+                    time_text or row["time_text"],
                 ),
             )
             self.db.execute(
                 "UPDATE memories SET status='corrected' WHERE id=?", (memory_id,)
+            )
+            # A later batch must not recreate the rejected interpretation under
+            # another model-generated topic key. Keep evidence for audit only.
+            source_ids = json.loads(row["source_ids"])
+            self.db.executemany(
+                "UPDATE sources SET status='reviewed' WHERE id=? AND status NOT IN ('forgotten','expired')",
+                ((value,) for value in source_ids),
+            )
+            self.db.executemany(
+                "INSERT OR IGNORE INTO source_tombstones VALUES (?)",
+                ((value,) for value in source_ids),
             )
             return cursor.lastrowid
 
@@ -775,6 +833,25 @@ class Store:
                 (day, scope_key, max(0, int(limit))),
             )
             return cursor.rowcount == 1
+
+    def reserve_call_budget(
+        self, day: str, scope_key: str, global_limit: int, group_limit: int
+    ) -> bool:
+        """Reserve both counters together; exhausting one never consumes the other."""
+        if scope_key == "*":
+            return False
+        with self._lock, self.db:
+            # BEGIN IMMEDIATE also serializes separate Store connections.
+            self.db.execute("BEGIN IMMEDIATE")
+            for key, limit in (("*", global_limit), (scope_key, group_limit)):
+                if self.budget_used(day, key) >= max(0, int(limit)):
+                    return False
+            self.db.executemany(
+                "INSERT INTO budgets(day,scope_key,used) VALUES (?,?,1) "
+                "ON CONFLICT(day,scope_key) DO UPDATE SET used=used+1",
+                ((day, key) for key in ("*", scope_key)),
+            )
+            return True
 
     def budget_used(self, day: str, scope_key: str) -> int:
         with self._lock:

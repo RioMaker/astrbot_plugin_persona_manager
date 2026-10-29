@@ -59,3 +59,32 @@ def test_plans_are_not_completion_and_negation_is_preserved():
     assert infer_state("我已经去了") == "completed"
     assert infer_state("还没完成") == "in_progress"
     assert infer_state("计划取消了") == "cancelled"
+
+
+@pytest.mark.parametrize(
+    "phrase",
+    [
+        "今天或明天",
+        "昨天下午或者晚上",
+        "昨天以前",
+        "下周一到下周五",
+        "2026年10月20日至22日",
+        "今天下午15点",
+    ],
+)
+def test_ambiguous_or_qualified_time_never_silently_resolves_one_fragment(phrase):
+    assert resolve_time(phrase, stamp("2026-10-29"))["start"] is None
+
+
+def test_relative_year_and_year_qualified_date_are_source_anchored():
+    result = resolve_time("去年", stamp("2026-10-29"))
+    assert result["start"] == stamp("2025-01-01")
+    assert result["end"] == stamp("2026-01-01")
+    assert result["precision"] == "year"
+    assert resolve_time("去年10月20日", stamp("2026-10-29"))["start"] == stamp(
+        "2025-10-20"
+    )
+
+
+def test_invalid_anchor_does_not_raise():
+    assert resolve_time("今天", float("inf"))["start"] is None

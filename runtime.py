@@ -6,11 +6,12 @@ import re
 import time
 from collections import defaultdict
 from datetime import datetime, timedelta, timezone
-from typing import Callable
+from typing import Awaitable, Callable
 
 from .learning import (
     build_prompt,
     extract_explicit_preferences,
+    learning_sources,
     parse_learning_response,
 )
 from .settings import Settings
@@ -27,14 +28,25 @@ def date_text(stamp) -> str:
 
 
 class Runtime:
-    def __init__(self, store: Store, context, config: Callable[[], Settings], logger):
+    def __init__(
+        self,
+        store: Store,
+        context,
+        config: Callable[[], Settings],
+        logger,
+        *,
+        source_guard: Callable[[dict], Awaitable[bool]] | None = None,
+    ):
         self.store = store
         self.context = context
         self.settings = config
         self.logger = logger
+        self.source_guard = source_guard
         self.task = None
         self.closed = False
         self.lock = asyncio.Lock()
+        self._run_lock = asyncio.Lock()
+        self._scan_after = None
         self.last_error = ""
         self.last_learning_at = None
         self._recent_styles = {}
@@ -63,20 +75,36 @@ class Runtime:
 
     async def capture(self, source: dict):
         settings = self.settings()
-        if not settings.learning_enabled or await self.paused():
-            return
-        await self.db("add_source", source)
-        if source["purpose"] == "interaction":
-            # Clear explicit preferences have a deterministic, zero-model path.
-            async with self.lock:
-                epoch = await self.db("epoch")
+        async with self.lock:
+            epoch = await self.db("epoch")
+            if not await self._learning_allowed([source], settings, epoch):
+                return
+            added = await self.db("add_source", source)
+            if not added or not await self._learning_allowed([source], settings, epoch):
+                return
+            if source["purpose"] == "interaction":
+                # Clear explicit preferences have a deterministic, zero-model path.
                 proposals = extract_explicit_preferences([source])
                 if proposals:
                     await self.db("apply_memories", proposals, epoch)
                     await self.db("mark_sources", [source["id"]], epoch)
 
     def _eligible(self, row: dict, settings: Settings) -> bool:
-        if row["persona_id"] != settings.persona_id:
+        if (
+            not settings.enabled
+            or not settings.persona_id
+            or row.get("persona_id") != settings.persona_id
+            or not all(
+                row.get(key) for key in ("group_id", "platform_id", "user_id", "bot_id")
+            )
+            or row.get("purpose") not in {"observation", "interaction"}
+            or row.get("user_id") == row.get("bot_id")
+        ):
+            return False
+        # Queue records must never turn private sessions into paid background work.
+        # Production also supplies a guard that validates the exact session identity.
+        umo = row.get("umo")
+        if umo and ":GroupMessage:" not in str(umo):
             return False
         if row["user_id"] in settings.ignored_qq:
             return False
@@ -84,7 +112,37 @@ class Runtime:
             return settings.observes(row["group_id"], row["platform_id"])
         return settings.remembers(row["group_id"], row["platform_id"])
 
+    async def _access_allowed(self, row: dict, settings: Settings) -> bool:
+        if (
+            self.closed
+            or self.settings() != settings
+            or not self._eligible(row, settings)
+        ):
+            return False
+        if self.source_guard is not None:
+            try:
+                if not await self.source_guard(row):
+                    return False
+            except Exception:
+                return False  # Revoked/unresolvable sessions are not a fallback route.
+        return not self.closed and self.settings() == settings
+
+    async def _learning_allowed(self, rows, settings: Settings, epoch: int) -> bool:
+        if not settings.learning_enabled or await self.paused():
+            return False
+        for row in rows:
+            if not await self._access_allowed(row, settings):
+                return False
+        if epoch != await self.db("epoch"):
+            return False
+        return not self.closed and self.settings() == settings
+
     async def run_once(self):
+        # Reloads or manual ticks must not spend twice on the same pending batch.
+        async with self._run_lock:
+            await self._run_once()
+
+    async def _run_once(self):
         settings = self.settings()
         await self.db(
             "cleanup",
@@ -93,9 +151,21 @@ class Runtime:
         )
         if not settings.enabled or not settings.learning_enabled or await self.paused():
             return
+        epoch = await self.db("epoch")
         rows = await self.db(
-            "pending_sources", persona_id=settings.persona_id, limit=500
+            "pending_sources",
+            persona_id=settings.persona_id,
+            limit=500,
+            after=self._scan_after,
         )
+        if not rows and self._scan_after is not None:
+            self._scan_after = None
+            rows = await self.db(
+                "pending_sources", persona_id=settings.persona_id, limit=500
+            )
+        if rows:
+            # Rotate through large queues: a disabled group cannot starve later ones.
+            self._scan_after = (rows[-1]["sent_at"], rows[-1]["id"])
         batches = defaultdict(list)
         for row in rows:
             if not self._eligible(row, settings):
@@ -118,12 +188,23 @@ class Runtime:
             if len(rows) < minimum:
                 continue
             selected, count = [], 0
-            for row in rows[: settings.batch_size]:
+            for row in rows[: min(settings.batch_size, 60)]:
                 if count + len(row["text"]) > settings.max_batch_chars:
                     break
                 selected.append(row)
                 count += len(row["text"])
             if not selected:
+                continue
+            if not await self._learning_allowed(selected, settings, epoch):
+                continue
+            original = selected
+            selected = learning_sources(purpose, original)
+            included = {row["id"] for row in selected}
+            rejected = [row["id"] for row in original if row["id"] not in included]
+            if rejected:
+                await self.db("mark_sources", rejected, epoch)
+            # Filtering secret/control contents must not trigger an empty paid call.
+            if len(selected) < minimum:
                 continue
             provider_id = settings.learning_provider_id
             if not provider_id:
@@ -133,15 +214,21 @@ class Runtime:
                 provider_id = await self.context.get_current_chat_provider_id(umo=umo)
             if not provider_id:
                 continue
+            # Provider/session lookup yielded control; permission may have changed.
+            if not await self._learning_allowed(selected, settings, epoch):
+                continue
             # Reservations count failed calls too, so outages cannot run up a bill.
             if not await self.db(
-                "reserve_budget", day, scope, settings.daily_group_calls
+                "reserve_call_budget",
+                day,
+                scope,
+                settings.daily_calls,
+                settings.daily_group_calls,
             ):
                 continue
-            if not await self.db("reserve_budget", day, "*", settings.daily_calls):
-                return
             await self.db("set_meta", attempt_key, now)
-            epoch = await self.db("epoch")
+            if not await self._learning_allowed(selected, settings, epoch):
+                return
             try:
                 response = await asyncio.wait_for(
                     self.context.llm_generate(
@@ -161,13 +248,7 @@ class Runtime:
                     purpose, selected, response.completion_text
                 )
                 async with self.lock:
-                    current = self.settings()
-                    if (
-                        current != settings
-                        or await self.paused()
-                        or await self.db("epoch") != epoch
-                        or not all(self._eligible(row, current) for row in selected)
-                    ):
+                    if not await self._learning_allowed(selected, settings, epoch):
                         return
                     if purpose == "interaction":
                         await self.db("apply_memories", proposals, epoch)
@@ -201,6 +282,13 @@ class Runtime:
     async def chat_context(self, source: dict) -> tuple[str, dict]:
         epoch = await self.db("epoch")
         settings = self.settings()
+        empty_trace = {"memory_ids": [], "event_ids": [], "style_ids": []}
+        # A current group may allow style without personal memory and vice versa.
+        access_source = {**source, "purpose": "interaction"}
+        if not settings.remembers(source["group_id"], source["platform_id"]):
+            access_source["purpose"] = "observation"
+        if not await self._access_allowed(access_source, settings):
+            return "", empty_trace
         profile = []
         timeline = []
         relationship = {}
@@ -221,8 +309,8 @@ class Runtime:
             timeline = [
                 row
                 for row in history
-                if row["kind"] == "event"
-                and row["status"] == "active"
+                if row["status"] == "active"
+                and row["id"] not in {item["id"] for item in profile}
                 and (
                     recall
                     or len(
@@ -342,7 +430,9 @@ class Runtime:
                 data = {"当前北京时间": data["当前北京时间"]}
                 break
             data[key].pop()
-        if epoch != await self.db("epoch"):
+        if not await self._access_allowed(access_source, settings):
+            return "", empty_trace
+        if epoch != await self.db("epoch") or self.settings() != settings:
             # A direct store mutation during assembly must not leak the old snapshot.
             data = {"当前北京时间": date_text(time.time())}
             profile, timeline, styles = [], [], []

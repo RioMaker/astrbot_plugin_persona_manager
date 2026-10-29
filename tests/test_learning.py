@@ -329,3 +329,61 @@ def test_wrong_purpose_is_a_caller_error():
         build_prompt("other", [])
     with pytest.raises(ValueError):
         parse_learning_response("other", [], "{}")
+
+
+@pytest.mark.parametrize("text", ["我以前在练幽玄", "我去年在练幽玄"])
+def test_historical_time_is_preserved_instead_of_becoming_current(text):
+    result = parse_learning_response(
+        "interaction", [source(text)], response(memory(text))
+    )
+    assert result[0]["time_text"] in {"以前", "去年"}
+
+
+def test_complete_time_expression_overrides_model_chosen_substring():
+    text = "我去年10月20日完成了十首练习曲"
+    result = parse_learning_response(
+        "interaction",
+        [source(text)],
+        response(memory(text, kind="event", time_expression="10月20日")),
+    )
+    assert result[0]["time_text"] == "去年10月20日"
+
+
+def test_iso_date_is_not_filtered_as_a_phone_number():
+    from learning import learning_sources
+
+    text = "我2026-10-20完成了十首练习曲"
+    sources = learning_sources("interaction", [source(text)])
+    assert sources
+    result = parse_learning_response(
+        "interaction", sources, response(memory(text, kind="event"))
+    )
+    assert result[0]["time_text"] == "2026-10-20"
+    assert learning_sources("interaction", [source("我的电话是138-1234-5678")]) == []
+    assert learning_sources("interaction", [source("sk-2026-10-20")]) == []
+    assert learning_sources("interaction", [source("1382026-10-20")]) == []
+
+
+@pytest.mark.parametrize(
+    "text",
+    [
+        "我以前在练幽玄，现在在练万戈",
+        "我不是在练幽玄",
+        "我喜欢猫，小明在练幽玄",
+        "我是不是在练幽玄",
+        "我喜欢猫吗",
+    ],
+)
+def test_ambiguous_multiple_stages_negation_or_question_not_learned(text):
+    assert (
+        parse_learning_response("interaction", [source(text)], response(memory(text)))
+        == []
+    )
+
+
+def test_future_progress_word_is_still_a_plan():
+    text = "我下周在练幽玄"
+    result = parse_learning_response(
+        "interaction", [source(text)], response(memory(text))
+    )
+    assert result[0]["state"] == "planned"

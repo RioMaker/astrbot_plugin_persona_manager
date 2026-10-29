@@ -290,3 +290,138 @@ def test_correcting_historical_goal_does_not_replace_newer_goal(store):
     store.apply_memories([proposal("new", "万戈")], store.epoch())
     store.correct(old, "当时其实练的是夏祭")
     assert store.profile("cocoa", "123")[0]["content"] == "万戈"
+
+
+def test_current_practice_and_future_plan_remain_separate(store):
+    store.add_source(source("current", sent="2026-10-28T10:00"))
+    store.apply_memories([proposal("current", "目前在练万戈")], store.epoch())
+    store.add_source(source("plan", sent="2026-10-29T10:00"))
+    planned = proposal("plan", "计划下周练幽玄", time_text="下周")
+    planned["state"] = "planned"
+    store.apply_memories([planned], store.epoch())
+    assert {r["state"]: r["content"] for r in store.profile("cocoa", "123")} == {
+        "in_progress": "目前在练万戈",
+        "planned": "计划下周练幽玄",
+    }
+    store.add_source(source("cancel", sent="2026-10-29T11:00"))
+    cancelled = proposal("cancel", "取消下周练幽玄的计划", time_text="下周")
+    cancelled["state"] = "cancelled"
+    store.apply_memories([cancelled], store.epoch())
+    # Cancelled plans are known immediately, not hidden until their former date.
+    rows = store.profile("cocoa", "123")
+    assert {r["state"] for r in rows} == {"in_progress", "cancelled"}
+
+
+def test_unknown_historical_claim_does_not_replace_current_profile(store):
+    store.add_source(source("current", sent="2026-10-28T10:00"))
+    store.apply_memories([proposal("current", "我现在在练万戈")], store.epoch())
+    store.add_source(source("past", sent="2026-10-29T10:00"))
+    store.apply_memories(
+        [proposal("past", "我以前在练幽玄", time_text="以前")], store.epoch()
+    )
+    assert [r["content"] for r in store.profile("cocoa", "123")] == ["我现在在练万戈"]
+    assert len(store.timeline("cocoa", "123")) == 2
+
+
+@pytest.mark.parametrize("phrase", ["本周", "本月", "今年"])
+def test_current_interval_uses_source_order_instead_of_interval_start(store, phrase):
+    store.add_source(source("early", sent="2026-10-29T08:00"))
+    store.apply_memories([proposal("early", "旧目标")], store.epoch())
+    store.add_source(source("late", sent="2026-10-29T10:00"))
+    store.apply_memories([proposal("late", "新目标", time_text=phrase)], store.epoch())
+    assert store.profile("cocoa", "123")[0]["content"] == "新目标"
+
+
+def test_correction_quarantines_original_source_against_future_relearning(store):
+    store.add_source(source())
+    original = store.apply_memories([proposal()], store.epoch())[0]
+    store.correct(original, "实际上在练万戈")
+    changed_key = proposal()
+    changed_key["key"] = "模型下次换一个主题"
+    assert store.apply_memories([changed_key], store.epoch()) == []
+    assert store.pending_sources() == []
+    assert not store.add_source(source())
+    store.mark_sources(["m1"], store.epoch(), "pending")
+    assert store.pending_sources() == []
+    assert store.relationship("cocoa", "123")["interaction_count"] == 1
+
+
+def test_unchanged_relative_time_in_correction_keeps_original_anchor(store):
+    store.add_source(source(sent="2026-10-20T10:00"))
+    original = store.apply_memories([proposal(time_text="昨天")], store.epoch())[0]
+    old = store.get_memory(original)
+    corrected = store.correct(original, "纠正描述", time_text="昨天")
+    row = store.get_memory(corrected)
+    assert row["event_start"] == old["event_start"] == ts("2026-10-19")
+    assert row["time_text"] == "昨天"
+
+
+def test_pending_cursor_preserves_same_timestamp_order(store):
+    for identity in ("c", "a", "b"):
+        store.add_source(source(identity))
+    first = store.pending_sources(limit=2)
+    following = store.pending_sources(after=(first[-1]["sent_at"], first[-1]["id"]))
+    assert [r["id"] for r in first + following] == ["a", "b", "c"]
+
+
+def test_budget_reservation_does_not_consume_other_counter_on_failure(store):
+    assert store.reserve_call_budget("2026-10-29", "g1", 1, 4)
+    assert not store.reserve_call_budget("2026-10-29", "g2", 1, 4)
+    assert store.budget_used("2026-10-29", "g2") == 0
+    assert not store.reserve_call_budget("2026-10-29", "g1", 10, 1)
+    assert store.budget_used("2026-10-29", "*") == 1
+
+
+def test_call_budget_is_atomic_across_separate_connections(tmp_path):
+    stores = [Store(tmp_path / "budget.sqlite3") for _ in range(2)]
+    try:
+        with ThreadPoolExecutor(max_workers=8) as executor:
+            outcomes = list(
+                executor.map(
+                    lambda index: stores[index % 2].reserve_call_budget(
+                        "2026-10-29", f"g{index % 2}", 7, 20
+                    ),
+                    range(40),
+                )
+            )
+        assert sum(outcomes) == 7
+        assert stores[0].budget_used("2026-10-29", "*") == 7
+        assert sum(stores[0].budget_used("2026-10-29", f"g{i}") for i in range(2)) == 7
+    finally:
+        for db in stores:
+            db.close()
+
+
+def test_legacy_database_adds_time_text_without_losing_old_memory(tmp_path):
+    import sqlite3
+
+    path = tmp_path / "legacy.sqlite3"
+    with sqlite3.connect(path) as db:
+        db.execute("""CREATE TABLE memories (
+            id INTEGER PRIMARY KEY, persona_id TEXT NOT NULL, user_id TEXT NOT NULL,
+            kind TEXT NOT NULL, key TEXT NOT NULL, content TEXT NOT NULL,
+            state TEXT NOT NULL, source_ids TEXT NOT NULL, source_group TEXT NOT NULL,
+            source_sent_at REAL NOT NULL, learned_at REAL NOT NULL,
+            event_start REAL, event_end REAL, precision TEXT NOT NULL,
+            valid_from REAL NOT NULL, status TEXT NOT NULL DEFAULT 'active',
+            corrects_id INTEGER, fingerprint TEXT UNIQUE NOT NULL)""")
+        db.execute("""INSERT INTO memories VALUES
+            (1,'cocoa','123','goal','current_practice','旧版记忆','in_progress','[]','g1',
+            100,200,NULL,NULL,'unknown',100,'active',NULL,'legacy')""")
+    migrated = Store(path)
+    try:
+        assert migrated.profile("cocoa", "123")[0]["content"] == "旧版记忆"
+        assert migrated.get_memory(1)["time_text"] == ""
+    finally:
+        migrated.close()
+
+
+@pytest.mark.parametrize("phrase", ["2026-02-30", "昨天以前", "今天或明天"])
+def test_invalid_or_ambiguous_time_cannot_overwrite_current_profile(store, phrase):
+    store.add_source(source("current", sent="2026-10-28T10:00"))
+    store.apply_memories([proposal("current", "当前目标")], store.epoch())
+    store.add_source(source("ambiguous", sent="2026-10-29T10:00"))
+    store.apply_memories(
+        [proposal("ambiguous", "时间不明的目标", time_text=phrase)], store.epoch()
+    )
+    assert [r["content"] for r in store.profile("cocoa", "123")] == ["当前目标"]

@@ -2,12 +2,21 @@
 
 from __future__ import annotations
 
+import enum
 import logging
 import sys
 import time
 from dataclasses import dataclass
 from types import ModuleType, SimpleNamespace
 from unittest.mock import AsyncMock
+
+
+class ResultContentType(enum.Enum):
+    GENERAL_RESULT = enum.auto()
+    LLM_RESULT = enum.auto()
+    AGENT_RUNNER_ERROR = enum.auto()
+    STREAMING_RESULT = enum.auto()
+    STREAMING_FINISH = enum.auto()
 
 
 @dataclass
@@ -69,6 +78,8 @@ class MockEvent:
         self.is_at_or_wake_command = wake
         self.is_wake = wake
         self.call_llm = False
+        # Most entry tests call the post-send hook directly after an LLM result.
+        self._has_send_oper = True
         self.sent = []
         self.message_str = text
         self.message_obj = SimpleNamespace(
@@ -89,7 +100,9 @@ class MockEvent:
         self.platform_meta = SimpleNamespace(
             id=platform_id, name=platform_name, description="Test platform"
         )
-        self._result = SimpleNamespace(chain=[Plain("收到")], is_llm_result=True)
+        self._result = SimpleNamespace(
+            chain=[Plain("收到")], result_content_type=ResultContentType.LLM_RESULT
+        )
 
     def is_stopped(self):
         return self.stopped
@@ -100,6 +113,17 @@ class MockEvent:
 
     def is_private_chat(self):
         return self.private
+
+    def is_admin(self):
+        return False
+
+    def should_call_llm(self, value):
+        self.call_llm = value
+
+    def plain_result(self, text):
+        return SimpleNamespace(
+            chain=[Plain(text)], result_content_type=ResultContentType.GENERAL_RESULT
+        )
 
     def get_group_id(self):
         return self.message_obj.group_id
@@ -136,6 +160,7 @@ class MockEvent:
 
     async def send(self, result):
         self.sent.append(result)
+        self._has_send_oper = True
 
 
 class Query(dict):
@@ -232,19 +257,33 @@ class MockContext:
                     activated=True,
                     enabled=True,
                     module_path="astrbot_plugin_access_gate",
-                    star_cls=SimpleNamespace(),
+                    star_cls=SimpleNamespace(
+                        _bool=lambda key, default=True: default,
+                        _entries=lambda key: (
+                            {"234567", "456789"} if key == "group_whitelist" else set()
+                        ),
+                    ),
                 )
             ]
             if access_gate
             else []
         )
         self.provider_cfg = {"persona_id": "可可子"}
+        self.cfg = {"provider_settings": self.provider_cfg}
+        self.provider = SimpleNamespace(
+            text_chat=AsyncMock(
+                return_value=SimpleNamespace(completion_text='{"should_reply":true}')
+            )
+        )
 
     def get_all_stars(self):
         return self.stars
 
     def get_config(self, *args, **kwargs):
-        return {"provider_settings": self.provider_cfg}
+        return self.cfg
+
+    def get_using_provider(self, *args, **kwargs):
+        return self.provider
 
     def register_web_api(self, route, handler, methods, description=""):
         self.routes[route] = handler
@@ -307,6 +346,19 @@ def install(monkeypatch, data_path):
     star.Context = MockContext
     star.Star = Star
     star.register = decorator("register")
+    command = module("astrbot.core.star.filter.command")
+    command.GreedyStr = str
+    session = module("astrbot.core.star.session_plugin_manager")
+    session.SessionPluginManager = SimpleNamespace(
+        is_plugin_enabled_for_session=AsyncMock(return_value=True)
+    )
+    services = module("astrbot.core.star.session_llm_manager")
+    services.SessionServiceManager = SimpleNamespace(
+        is_llm_enabled_for_session=AsyncMock(return_value=True),
+        is_session_enabled=AsyncMock(return_value=True),
+    )
+    result = module("astrbot.core.message.message_event_result")
+    result.ResultContentType = ResultContentType
     components = module("astrbot.api.message_components")
     components.Plain = Plain
     components.At = At

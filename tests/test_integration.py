@@ -505,3 +505,346 @@ def test_initialize_never_overwrites_native_persona_and_observer_priority(entry)
             )
 
     asyncio.run(run())
+
+
+@pytest.fixture
+def actual_gate(entry, monkeypatch):
+    """Import the current sibling gate, not a hand-reimplemented router."""
+    path = (
+        Path(__file__).resolve().parents[2] / "astrbot_plugin_access_gate" / "main.py"
+    )
+    if not path.exists():
+        pytest.skip("workspace Access Gate checkout unavailable")
+    name = "_persona_actual_access_gate"
+    spec = importlib.util.spec_from_file_location(name, path)
+    module = importlib.util.module_from_spec(spec)
+    monkeypatch.setitem(sys.modules, name, module)
+    spec.loader.exec_module(module)
+    return module.AccessGatePlugin
+
+
+@pytest.mark.parametrize(
+    "case", ["chat", "ambient", "command", "denied", "private", "private_bind"]
+)
+def test_actual_gate_then_persona_preserves_routing_and_private_zero_cost(
+    entry, actual_gate, case
+):
+    async def run():
+        context = MockContext()
+        gate = actual_gate(context, {"group_whitelist": ["234567"]})
+        context.stars[0].star_cls = gate
+        text = {
+            "chat": "可可子以后回答简短",
+            "ambient": "这局稳如老狗",
+            "command": "/rtlink profile",
+            "denied": "可可子以后回答简短",
+            "private": "帮我问问可可子",
+            "private_bind": "/rtlink bind fake-key 1234",
+        }[case]
+        event = MockEvent(
+            text,
+            private=case.startswith("private"),
+            group_id=""
+            if case.startswith("private")
+            else "456789"
+            if case == "denied"
+            else "234567",
+        )
+        event._has_send_oper = False
+        async with entry.running(
+            {"observation_groups": ["234567", "456789"]}, context
+        ) as env:
+            await gate.enforce_access(event)
+            await gate.route_wake(event)
+            routed = (
+                event.stopped,
+                event.call_llm,
+                event.is_at_or_wake_command,
+                event.message_str,
+            )
+            await env.plugin.observe(event)
+            req = request()
+            req.prompt = event.message_str
+            # Default collect_initial_request caches this exact object before
+            # the framework invokes on_llm_request (not only plugin requests).
+            if case == "chat":
+                event.set_extra("provider_request", req)
+            original = snapshot(req)
+            await env.plugin.on_request(event, req)
+            assert snapshot(req) == original
+            assert (
+                event.stopped,
+                event.call_llm,
+                event.is_at_or_wake_command,
+                event.message_str,
+            ) == routed
+            if case == "chat":
+                assert event.get_extra("access_gate_original_text") == text
+                assert not event.call_llm and event.is_at_or_wake_command
+                assert len(req.extra_user_content_parts) == 2
+                event._has_send_oper = True
+                await env.plugin.after_sent(event)
+                assert (
+                    env.plugin.store.profile("可可子", "123456")[0]["content"] == text
+                )
+            elif case == "ambient":
+                assert event.call_llm
+                assert env.plugin.store.pending_sources()[0]["purpose"] == "observation"
+            else:
+                assert len(req.extra_user_content_parts) == 1
+                assert env.plugin.store.pending_sources() == []
+                assert env.plugin.store.profile("可可子", "123456") == []
+                assert event.stopped == (case in {"denied", "private"})
+                if case == "private_bind":
+                    assert event.call_llm  # Command remains runnable; no default chat.
+            context.provider.text_chat.assert_not_called()
+            context.llm_generate.assert_not_called()
+
+    asyncio.run(run())
+
+
+def test_actual_gate_can_allow_private_but_persona_still_never_uses_tokens(
+    entry, actual_gate
+):
+    async def run():
+        context = MockContext()
+        gate = actual_gate(context, {"private_whitelist": ["123456"]})
+        context.stars[0].star_cls = gate
+        event = MockEvent("请问可可子能回答吗", private=True, group_id="")
+        async with entry.running({}, context) as env:
+            await gate.enforce_access(event)
+            await gate.route_wake(event)
+            assert (
+                context.provider.text_chat.await_count == 1
+            )  # Gate's classifier, not this plugin.
+            assert not event.call_llm
+            req = request()
+            await env.plugin.observe(event)
+            await env.plugin.on_request(event, req)
+            await env.plugin.after_sent(event)
+            await env.plugin.after_stream(event)
+            await env.plugin.runtime.run_once()
+            assert env.plugin.store.pending_sources() == []
+            assert len(req.extra_user_content_parts) == 1
+            context.llm_generate.assert_not_called()
+
+    asyncio.run(run())
+
+
+def test_session_disabled_gate_blocks_observation_even_when_global_star_loaded(entry):
+    async def run():
+        async with entry.running({"observation_groups": ["234567"]}) as env:
+            from astrbot.core.star.session_plugin_manager import SessionPluginManager
+
+            SessionPluginManager.is_plugin_enabled_for_session.side_effect = (
+                lambda _umo, name: name != env.module.GATE_NAME
+            )
+            event = MockEvent("稳如老狗")
+            await env.plugin.observe(event)
+            event.set_extra("access_gate_original_text", event.message_str)
+            await env.plugin.on_request(event, request())
+            await env.plugin.after_sent(event)
+            assert env.plugin.store.pending_sources() == []
+            env.context.llm_generate.assert_not_called()
+
+    asyncio.run(run())
+
+
+@pytest.mark.parametrize(
+    "revoked",
+    [
+        "gate_unloaded",
+        "plugin_set",
+        "mixed_wildcard",
+        "session_disabled",
+        "persona",
+        "whitelist",
+        "provider_disabled",
+        "session_llm_disabled",
+        "session_disabled_service",
+        "private_umo",
+    ],
+)
+def test_queued_source_guard_rechecks_actual_policy(entry, actual_gate, revoked):
+    async def run():
+        async with entry.running() as env:
+            gate = actual_gate(env.context, {"group_whitelist": ["234567"]})
+            env.context.stars[0].star_cls = gate
+            source = sample(MockEvent(), Settings(), "interaction")
+            assert await env.plugin._source_allowed(source)
+            if revoked == "gate_unloaded":
+                env.context.stars.clear()
+            elif revoked == "plugin_set":
+                env.context.cfg["plugin_set"] = [env.module.PLUGIN_NAME]
+            elif revoked == "mixed_wildcard":
+                env.context.cfg["plugin_set"] = ["*", env.module.PLUGIN_NAME]
+            elif revoked == "session_disabled":
+                from astrbot.core.star.session_plugin_manager import (
+                    SessionPluginManager,
+                )
+
+                SessionPluginManager.is_plugin_enabled_for_session.return_value = False
+            elif revoked == "persona":
+                env.context.conversation_manager.get_conversation.return_value.persona_id = "其他人格"
+            elif revoked == "whitelist":
+                gate.config["group_whitelist"] = []
+            elif revoked == "provider_disabled":
+                env.context.provider_cfg["enable"] = False
+            elif revoked in {"session_llm_disabled", "session_disabled_service"}:
+                from astrbot.core.star.session_llm_manager import SessionServiceManager
+
+                method = (
+                    SessionServiceManager.is_llm_enabled_for_session
+                    if revoked == "session_llm_disabled"
+                    else SessionServiceManager.is_session_enabled
+                )
+                method.return_value = False
+            elif revoked == "private_umo":
+                source["umo"] = "qq-main:FriendMessage:123456"
+            assert not await env.plugin._source_allowed(source)
+            env.context.llm_generate.assert_not_called()
+
+    asyncio.run(run())
+
+
+@pytest.mark.parametrize(
+    "result_type,sent,stream_hook,recorded",
+    [
+        ("LLM_RESULT", True, False, True),
+        ("LLM_RESULT", False, False, False),
+        ("GENERAL_RESULT", True, False, False),
+        ("AGENT_RUNNER_ERROR", True, False, False),
+        ("STREAMING_RESULT", True, True, False),
+        ("STREAMING_FINISH", False, True, False),
+        ("STREAMING_FINISH", True, True, True),
+    ],
+)
+def test_only_delivered_main_result_or_finished_stream_records_interaction(
+    entry, result_type, sent, stream_hook, recorded
+):
+    from astrbot_plugin_persona_manager.tests.astrbot_stub import ResultContentType
+
+    async def run():
+        async with entry.running() as env:
+            event = MockEvent(extras={"access_gate_original_text": "以后回答简短"})
+            await env.plugin.on_request(event, request())
+            event._has_send_oper = sent
+            event._result.result_content_type = getattr(ResultContentType, result_type)
+            handler = env.plugin.after_stream if stream_hook else env.plugin.after_sent
+            await handler(event)
+            await handler(event)
+            assert len(env.plugin.store.timeline("可可子", "123456")) == int(recorded)
+
+    asyncio.run(run())
+
+
+def test_empty_stream_finish_never_records_interaction(entry):
+    from astrbot_plugin_persona_manager.tests.astrbot_stub import ResultContentType
+
+    async def run():
+        async with entry.running() as env:
+            event = MockEvent(extras={"access_gate_original_text": "以后回答简短"})
+            await env.plugin.on_request(event, request())
+            event._result.result_content_type = ResultContentType.STREAMING_FINISH
+            event._result.chain = []
+            await env.plugin.after_stream(event)
+            assert env.plugin.store.timeline("可可子", "123456") == []
+
+    asyncio.run(run())
+
+
+def test_explicit_other_plugin_request_is_never_injected_or_recorded(entry):
+    from copy import copy
+
+    async def run():
+        async with entry.running() as env:
+            req = request()
+            event = MockEvent(
+                extras={
+                    "access_gate_original_text": "以后回答简短",
+                    "provider_request": req,
+                }
+            )
+            original = list(req.extra_user_content_parts)
+            # collect_initial_request shallow-copies the explicit request and
+            # list fields; the event retains the original plugin-owned request.
+            prepared = copy(req)
+            prepared.extra_user_content_parts = list(req.extra_user_content_parts)
+            prepared.contexts = list(req.contexts)
+            prepared.image_urls = list(req.image_urls)
+            await env.plugin.on_request(event, prepared)
+            await env.plugin.after_sent(event)
+            assert req.extra_user_content_parts == original
+            assert prepared.extra_user_content_parts == original
+            assert env.plugin.store.pending_sources() == []
+
+    asyncio.run(run())
+
+
+def test_actual_professional_tool_filters_survive_persona_hook(entry):
+    """Execute the actual sibling methods without importing their rendering stacks."""
+    import ast
+    import copy
+
+    workspace = Path(__file__).resolve().parents[2]
+    hooks = []
+    for directory, method_name in [
+        ("astrbot_plugin_liuyao", "configure_liuyao_agent_tools"),
+        ("astrbot_plugin_wuxing_num", "filter_agent_tools"),
+    ]:
+        path = workspace / directory / "main.py"
+        if not path.exists():
+            pytest.skip("workspace professional plugin checkout unavailable")
+        tree = ast.parse(path.read_text(encoding="utf-8"))
+        node = next(
+            n
+            for n in ast.walk(tree)
+            if isinstance(n, ast.AsyncFunctionDef) and n.name == method_name
+        )
+        node.decorator_list = []
+        node.returns = None
+        for arg in node.args.args:
+            arg.annotation = None
+        namespace = {
+            "copy": copy if "liuyao" in directory else copy.copy,
+            "AGENT_ACTION_TOOL_NAMES": {"cast_liuyao"},
+        }
+        exec(
+            compile(
+                ast.fix_missing_locations(ast.Module(body=[node], type_ignores=[])),
+                str(path),
+                "exec",
+            ),
+            namespace,
+        )
+        hooks.append(namespace[method_name])
+
+    class ToolSet:
+        def __init__(self):
+            self.tools = [
+                SimpleNamespace(name=x)
+                for x in ("query_rtlink", "cast_liuyao", "divine_wuxing_five_numbers")
+            ]
+
+        def remove_tool(self, name):
+            self.tools = [x for x in self.tools if x.name != name]
+
+    async def run():
+        async with entry.running() as env:
+            event = MockEvent(extras={"access_gate_original_text": "以后回答简短"})
+            req = request()
+            shared = ToolSet()
+            req.func_tool = shared
+            for hook in hooks:
+                owner = SimpleNamespace(
+                    config={"llm_tool_enabled": False}, _config_get=lambda *_: False
+                )
+                await hook(owner, event, req)
+            assert [t.name for t in req.func_tool.tools] == ["query_rtlink"]
+            filtered = req.func_tool
+            await env.plugin.on_request(event, req)
+            assert req.func_tool is filtered
+            assert [t.name for t in req.func_tool.tools] == ["query_rtlink"]
+            assert len(shared.tools) == 3
+
+    asyncio.run(run())

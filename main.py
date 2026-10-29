@@ -11,6 +11,9 @@ from astrbot.api.provider import ProviderRequest
 from astrbot.api.star import Context, Star
 from astrbot.api.web import error_response, json_response, request
 from astrbot.core.agent.message import TextPart
+from astrbot.core.message.message_event_result import ResultContentType
+from astrbot.core.star.session_llm_manager import SessionServiceManager
+from astrbot.core.star.session_plugin_manager import SessionPluginManager
 from astrbot.core.utils.astrbot_path import get_astrbot_data_path
 
 from .ingress import group_identity, sample
@@ -35,7 +38,13 @@ class PersonaManagerPlugin(Star):
             / "persona.sqlite3"
         )
         self.store = Store(path)
-        self.runtime = Runtime(self.store, context, self.settings, logger)
+        self.runtime = Runtime(
+            self.store,
+            context,
+            self.settings,
+            logger,
+            source_guard=self._source_allowed,
+        )
         self._debug = {}
         for endpoint, method, handler in (
             ("state", "GET", self.page_state),
@@ -54,7 +63,7 @@ class PersonaManagerPlugin(Star):
 
     def _gate_loaded(self, event=None) -> bool:
         plugins = getattr(event, "plugins_name", None)
-        if plugins is not None and "*" not in plugins and GATE_NAME not in plugins:
+        if plugins is not None and plugins != ["*"] and GATE_NAME not in plugins:
             return False
         return any(
             getattr(star, "name", None) == GATE_NAME
@@ -63,27 +72,86 @@ class PersonaManagerPlugin(Star):
             for star in self.context.get_all_stars()
         )
 
+    async def _gate_allowed(self, event) -> bool:
+        if not self._gate_loaded(event):
+            return False
+        return await SessionPluginManager.is_plugin_enabled_for_session(
+            event.unified_msg_origin, GATE_NAME
+        )
+
+    async def _source_allowed(self, source) -> bool:
+        """Recheck queued sources without invoking or mutating the gate handlers."""
+        umo = str(source.get("umo", ""))
+        parts = umo.split(":", 2)
+        if (
+            len(parts) != 3
+            or parts[0] != source.get("platform_id")
+            or parts[1] != "GroupMessage"
+            or not parts[2]
+            or not self._gate_loaded()
+        ):
+            return False
+        cfg = self.context.get_config(umo=umo)
+        plugins = cfg.get("plugin_set", ["*"])
+        if plugins != ["*"] and (
+            GATE_NAME not in plugins or PLUGIN_NAME not in plugins
+        ):
+            return False
+        for name in (GATE_NAME, PLUGIN_NAME):
+            if not await SessionPluginManager.is_plugin_enabled_for_session(umo, name):
+                return False
+        if not cfg.get("provider_settings", {}).get("enable", True):
+            return False
+        if not await SessionServiceManager.is_session_enabled(umo):
+            return False
+        if not await SessionServiceManager.is_llm_enabled_for_session(umo):
+            return False
+        gate = next(
+            star.star_cls
+            for star in self.context.get_all_stars()
+            if getattr(star, "name", None) == GATE_NAME
+            and getattr(star, "activated", False)
+        )
+        # These are read-only helpers on the supported Access Gate. If its
+        # contract changes, pause extraction rather than guessing permissions.
+        if not callable(getattr(gate, "_bool", None)) or not callable(
+            getattr(gate, "_entries", None)
+        ):
+            return False
+        admin = str(source.get("user_id")) in {
+            str(value) for value in cfg.get("admins_id", [])
+        }
+        if not (admin and gate._bool("group_admin_bypass", True)):
+            if gate._bool("group_whitelist_enabled", True) and not (
+                {str(source.get("group_id")), umo} & gate._entries("group_whitelist")
+            ):
+                return False
+        return await self._selected_origin(umo, "aiocqhttp")
+
     async def _selected(self, event, req=None) -> bool:
         """Resolve real persona identity; never guess from system prompt text."""
+        return await self._selected_origin(
+            event.unified_msg_origin, event.get_platform_name(), req
+        )
+
+    async def _selected_origin(self, umo, platform_name, req=None) -> bool:
         conversation = getattr(req, "conversation", None)
         if conversation is None:
             manager = self.context.conversation_manager
-            cid = await manager.get_curr_conversation_id(event.unified_msg_origin)
+            cid = await manager.get_curr_conversation_id(umo)
             if cid:
-                conversation = await manager.get_conversation(
-                    event.unified_msg_origin, cid
-                )
+                conversation = await manager.get_conversation(umo, cid)
         persona_id = getattr(conversation, "persona_id", None)
         manager = self.context.persona_manager
         resolver = getattr(manager, "resolve_selected_persona", None)
         if callable(resolver):
             persona_id, _, _, _ = await resolver(
-                umo=event.unified_msg_origin,
+                umo=umo,
                 conversation_persona_id=persona_id,
-                platform_name=event.get_platform_name(),
+                platform_name=platform_name,
             )
         elif persona_id is None:
-            persona = manager.get_default_persona_v3(umo=event.unified_msg_origin)
+            persona = manager.get_default_persona_v3(umo=umo)
             if inspect.isawaitable(persona):
                 persona = await persona
             persona_id = persona.get("name") if isinstance(persona, dict) else None
@@ -99,7 +167,7 @@ class PersonaManagerPlugin(Star):
         if not settings.observes(identity["group_id"], identity["platform_id"]):
             return
         try:
-            if not self._gate_loaded(event) or not await self._selected(event):
+            if not await self._gate_allowed(event) or not await self._selected(event):
                 return
             # An actual chat request will be recorded on its successful send hook.
             if event.get_extra("access_gate_original_text", None) is not None:
@@ -120,8 +188,16 @@ class PersonaManagerPlugin(Star):
             return
         if getattr(event, "call_llm", False):
             return
+        # collect_initial_request caches the default chat request itself, while
+        # explicit plugin requests are shallow-copied before invoking this hook.
+        # Presence alone cannot distinguish them: normal chat also has this key.
+        cached_request = event.get_extra("provider_request", None)
+        if cached_request is not None and cached_request is not req:
+            return
         try:
-            if not self._gate_loaded(event) or not await self._selected(event, req):
+            if not await self._gate_allowed(event) or not await self._selected(
+                event, req
+            ):
                 return
             source = sample(event, settings, "interaction")
             if source is None:
@@ -141,7 +217,8 @@ class PersonaManagerPlugin(Star):
                         and getattr(part, "text", "").startswith(CONTEXT_MARKER)
                     )
                 ]
-                parts.append(TextPart(text=context).mark_as_temp())
+                if context:
+                    parts.append(TextPart(text=context).mark_as_temp())
                 if len(self._debug) >= 100:
                     self._debug.pop(next(iter(self._debug)))
                 self._debug[source["scope_key"]] = detail
@@ -150,6 +227,32 @@ class PersonaManagerPlugin(Star):
 
     @filter.after_message_sent()
     async def after_sent(self, event: AstrMessageEvent):
+        result = event.get_result()
+        if (
+            not result
+            or getattr(result, "result_content_type", None)
+            != ResultContentType.LLM_RESULT
+            or not getattr(event, "_has_send_oper", False)
+        ):
+            return
+        await self._record_interaction(event)
+
+    @filter.on_decorating_result(priority=-100)
+    async def after_stream(self, event: AstrMessageEvent):
+        # RespondStage skips after_message_sent for streaming. The framework
+        # creates STREAMING_FINISH only after the stream has been consumed.
+        result = event.get_result()
+        if (
+            not result
+            or getattr(result, "result_content_type", None)
+            != ResultContentType.STREAMING_FINISH
+            or not getattr(result, "chain", None)
+            or not getattr(event, "_has_send_oper", False)
+        ):
+            return
+        await self._record_interaction(event)
+
+    async def _record_interaction(self, event):
         settings = self.settings()
         if group_identity(event, settings) is None or event.get_extra(SENT_KEY, False):
             return
@@ -159,7 +262,7 @@ class PersonaManagerPlugin(Star):
         if not settings.remembers(source["group_id"], source["platform_id"]):
             return
         try:
-            if not self._gate_loaded(event) or not await self._selected(event):
+            if not await self._gate_allowed(event) or not await self._selected(event):
                 return
             event.set_extra(SENT_KEY, True)
             await self.runtime.capture(source)
@@ -224,6 +327,8 @@ class PersonaManagerPlugin(Star):
                     "status": {
                         **await self.runtime.db("stats"),
                         "paused": await self.runtime.paused(),
+                        "enabled": self.settings().enabled,
+                        "learning_enabled": self.settings().learning_enabled,
                         "gate_loaded": self._gate_loaded(),
                         "private_chat": "disabled",
                         "last_error": self.runtime.last_error,
