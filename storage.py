@@ -13,6 +13,7 @@ from datetime import date, datetime, timedelta
 from pathlib import Path
 from typing import Callable
 
+from .style_matching import fits_conversation, fits_group
 from .temporal import BEIJING, is_past_reference, resolve_time
 from .usage import token_count, usage_values
 
@@ -753,6 +754,28 @@ class Store:
                 for key in ("contexts", "avoid", "source_ids"):
                     item[key] = json.loads(item[key])
                 output.append(item)
+            return output
+
+    def global_styles(self, persona_id, exclude_scope, tags, query, limit=40):
+        """Reference active originals: disabling, forgetting and rollback apply globally."""
+        if not tags or limit <= 0:
+            return []
+        with self._lock:
+            rows = self.db.execute(
+                "SELECT * FROM styles WHERE status='active' AND scope_key<>? "
+                "AND scope_key IN (SELECT DISTINCT scope_key FROM sources WHERE persona_id=?) "
+                "ORDER BY updated_at DESC,id DESC",
+                (exclude_scope, persona_id),
+            )
+            output = []
+            for row in rows:
+                item = dict(row)
+                for key in ("contexts", "avoid", "source_ids"):
+                    item[key] = json.loads(item[key])
+                if fits_group(item, tags, query) and fits_conversation(item, query):
+                    output.append(item)
+                    if len(output) >= limit:
+                        break
             return output
 
     def get_style(self, style_id: int) -> dict | None:

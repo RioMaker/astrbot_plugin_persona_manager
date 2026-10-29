@@ -3,6 +3,8 @@
 from dataclasses import dataclass, field
 from typing import Any, Mapping
 
+from .style_matching import parse_tag_entry
+
 INT_LIMITS = {
     "batch_size": (30, 1, 60),
     "min_observation_batch": (20, 2, 60),
@@ -46,6 +48,8 @@ class Settings:
     enabled: bool = True
     persona_id: str = "可可子"
     observation_groups: frozenset[str] = field(default_factory=frozenset)
+    global_style_groups: frozenset[str] = field(default_factory=frozenset)
+    group_tags: frozenset[str] = field(default_factory=frozenset)
     memory_enabled: bool = True
     memory_groups: frozenset[str] = field(default_factory=frozenset)
     memory_disabled_groups: frozenset[str] = field(default_factory=frozenset)
@@ -92,6 +96,8 @@ class Settings:
         ).strip()
         for name in (
             "observation_groups",
+            "global_style_groups",
+            "group_tags",
             "memory_groups",
             "memory_disabled_groups",
             "ignored_qq",
@@ -122,3 +128,18 @@ class Settings:
             and self.group_in(group_id, platform_id, self.memory_groups)
             and not self.group_in(group_id, platform_id, self.memory_disabled_groups)
         )
+
+    def uses_global_styles(self, group_id: str, platform_id: str) -> bool:
+        return self.group_in(group_id, platform_id, self.global_style_groups)
+
+    def tags_for(self, group_id: str, platform_id: str) -> tuple[str, ...]:
+        parsed = {}
+        for entry in sorted(self.group_tags):
+            try:
+                key, tags = parse_tag_entry(entry)
+            except ValueError:
+                continue
+            if key in parsed:
+                return ()  # Ambiguous native configuration never grants a match.
+            parsed[key] = tags
+        return parsed.get(f"{platform_id}:{group_id}", parsed.get(group_id, ()))

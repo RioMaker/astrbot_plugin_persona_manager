@@ -80,6 +80,68 @@ function edit(ui, key, value) {
   (field.handlers.input || field.handlers.change)();
 }
 
+test("global toggle and tag editor persist without enabling collection", async () => {
+  const ui = page(); await flush();
+  ui.view.groups = [knownGroup()];
+  await vm.runInContext("loadState()", ui.sandbox);
+  const tag = ui.elements.get("group-tags-qq-main-234567");
+  tag.value = "太鼓达人、轻松"; tag.handlers.input();
+  // Input must stay mounted: Chinese IME and caret must not be lost on each key.
+  assert.equal(ui.elements.get(tag.id), tag);
+  const control = ui.elements.get("group-global-qq-main-234567");
+  control.checked = true; control.handlers.change();
+  await vm.runInContext("loadState()", ui.sandbox);
+  assert.equal(ui.elements.get(tag.id).value, "太鼓达人、轻松");
+  assert.equal(ui.elements.get("group-observation-qq-main-234567").checked, false);
+  assert.equal(ui.elements.get("group-memory-qq-main-234567").checked, false);
+  await ui.elements.get("settings-form").handlers.submit({ preventDefault() {} });
+  assert.deepEqual(ui.posts[0].payload.values, {global_style_groups:["qq-main:234567"], group_tags:["qq-main:234567=太鼓达人、轻松"]});
+});
+
+test("tag removal and global disabling preserve other connections and unknown groups", async () => {
+  const ui = page(); await flush();
+  ui.view.groups = [knownGroup(), knownGroup("qq-second")];
+  ui.view.config.values.group_tags = ["234567=轻松", "qq-other:999999=读书"];
+  ui.view.config.values.global_style_groups = ["234567", "qq-other:999999"];
+  await vm.runInContext("loadState()", ui.sandbox);
+  const tag = ui.elements.get("group-tags-qq-main-234567"); tag.value = ""; tag.handlers.input();
+  const control = ui.elements.get("group-global-qq-main-234567"); control.checked = false; control.handlers.change();
+  assert.equal(ui.elements.get("group-tags-qq-second-234567").value, "轻松");
+  assert.equal(ui.elements.get("group-tags-qq-main-234567").value, "");
+  await ui.elements.get("settings-form").handlers.submit({ preventDefault() {} });
+  assert.deepEqual(ui.posts[0].payload.values.group_tags, ["qq-other:999999=读书", "qq-second:234567=轻松"]);
+  assert.deepEqual(ui.posts[0].payload.values.global_style_groups, ["qq-other:999999", "qq-second:234567"]);
+});
+
+test("tag search and stale revision keep and protect the draft", async () => {
+  const ui = page(); await flush();
+  ui.view.groups = [knownGroup()];
+  await vm.runInContext("loadState()", ui.sandbox);
+  const tag = ui.elements.get("group-tags-qq-main-234567"); tag.value = "技术"; tag.handlers.input();
+  ui.elements.get("group-search").value = "技术"; ui.elements.get("group-search").handlers.input();
+  assert.match(textOf(ui.elements.get("group-list")), /鼓友/);
+  ui.view.config.revision = "other-editor";
+  await vm.runInContext("loadState()", ui.sandbox);
+  const fresh = ui.elements.get(tag.id);
+  assert.equal(fresh.value, "技术");
+  assert.equal(fresh.disabled, true);
+  fresh.value = "discard"; fresh.handlers.input();
+  assert.equal(ui.elements.get("setting-group_tags").value, "qq-main:234567=技术");
+  assert.equal(ui.elements.get("group-global-qq-main-234567").disabled, true);
+});
+
+test("failed global setting save preserves tags and switch drafts", async () => {
+  const ui = page({postError: new Error("写入失败")}); await flush();
+  ui.view.groups = [knownGroup()];
+  await vm.runInContext("loadState()", ui.sandbox);
+  const tag = ui.elements.get("group-tags-qq-main-234567"); tag.value = "轻松"; tag.handlers.input();
+  const control = ui.elements.get("group-global-qq-main-234567"); control.checked = true; control.handlers.change();
+  await ui.elements.get("settings-form").handlers.submit({ preventDefault() {} });
+  assert.match(ui.elements.get("notice").textContent, /写入失败/);
+  assert.equal(ui.elements.get(tag.id).value, "轻松");
+  assert.equal(ui.elements.get(control.id).checked, true);
+});
+
 for (const [input, expected] of [["昨天", null], ["", null], ["2026-10-20", "2026-10-20"]]) {
   test(`editing a historical memory sends only changed time: ${JSON.stringify(input)}`, async () => {
     const ui = page();
@@ -249,7 +311,7 @@ test("direction example only changes the local draft", async () => {
   assert.equal(ui.elements.get("config-dirty").textContent, "1 项未保存修改");
 });
 
-test("discovered groups show names and start with two unselected switches", async () => {
+test("discovered groups show names and start with three unselected switches", async () => {
   const ui = page(); await flush();
   ui.view.groups = [knownGroup()];
   await vm.runInContext("loadState()", ui.sandbox);
@@ -260,6 +322,7 @@ test("discovered groups show names and start with two unselected switches", asyn
   assert.match(text, /42 人/);
   assert.equal(ui.elements.get("group-observation-qq-main-234567").checked, false);
   assert.equal(ui.elements.get("group-memory-qq-main-234567").checked, false);
+  assert.equal(ui.elements.get("group-global-qq-main-234567").checked, false);
   assert.equal(ui.posts.length, 0);
 });
 

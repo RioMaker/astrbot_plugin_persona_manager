@@ -8,6 +8,7 @@ from pathlib import Path
 
 from .scheduling import parse_window
 from .settings import INT_LIMITS, Settings
+from .style_matching import parse_tag_entry
 
 SCHEMA = json.loads(
     (Path(__file__).parent / "_conf_schema.json").read_text(encoding="utf-8")
@@ -17,6 +18,8 @@ SECTIONS = {
         "enabled",
         "persona_id",
         "observation_groups",
+        "global_style_groups",
+        "group_tags",
         "memory_enabled",
         "memory_groups",
         "memory_disabled_groups",
@@ -108,7 +111,12 @@ def validate_changes(current, changes) -> dict:
             ):
                 raise ValueError(f"{label}须为文本列表，最多500项")
             value = sorted(set(item.strip() for item in value if item.strip()))
-            if key.endswith("windows"):
+            if key == "group_tags":
+                parsed = [parse_tag_entry(item) for item in value]
+                if len({key for key, _ in parsed}) != len(parsed):
+                    raise ValueError("同一群的标签不能重复配置")
+                value = sorted(key + "=" + ",".join(tags) for key, tags in parsed)
+            elif key.endswith("windows"):
                 if len(value) > 24:
                     raise ValueError("时间窗最多24项")
                 for item in value:

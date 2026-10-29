@@ -3,7 +3,6 @@
 import asyncio
 import hashlib
 import json
-import re
 import time
 from collections import defaultdict
 from datetime import datetime, timedelta, timezone
@@ -18,6 +17,7 @@ from .learning import (
 from .scheduling import batch_due, batch_policy
 from .settings import Settings
 from .storage import Store
+from .style_matching import fits_conversation, normalize
 from .usage import estimate_request_tokens, normalize_usage
 
 BEIJING = timezone(timedelta(hours=8))
@@ -152,7 +152,7 @@ class Runtime:
             or not all(
                 row.get(key) for key in ("group_id", "platform_id", "user_id", "bot_id")
             )
-            or row.get("purpose") not in {"observation", "interaction"}
+            or row.get("purpose") not in {"observation", "interaction", "style_recall"}
             or row.get("user_id") == row.get("bot_id")
         ):
             return False
@@ -163,6 +163,8 @@ class Runtime:
             return False
         if row["user_id"] in settings.ignored_qq:
             return False
+        if row["purpose"] == "style_recall":
+            return settings.uses_global_styles(row["group_id"], row["platform_id"])
         if row["purpose"] == "observation":
             return settings.observes(row["group_id"], row["platform_id"])
         return settings.remembers(row["group_id"], row["platform_id"])
@@ -186,6 +188,8 @@ class Runtime:
         if not settings.learning_enabled or await self.paused():
             return False
         for row in rows:
+            if row.get("purpose") not in {"observation", "interaction"}:
+                return False
             if not await self._access_allowed(row, settings):
                 return False
         if epoch != await self.db("epoch"):
@@ -530,7 +534,11 @@ class Runtime:
         # A current group may allow style without personal memory and vice versa.
         access_source = {**source, "purpose": "interaction"}
         if not settings.remembers(source["group_id"], source["platform_id"]):
-            access_source["purpose"] = "observation"
+            access_source["purpose"] = (
+                "observation"
+                if settings.observes(source["group_id"], source["platform_id"])
+                else "style_recall"
+            )
         if not await self._access_allowed(access_source, settings):
             return "", empty_trace
         profile = []
@@ -571,8 +579,21 @@ class Runtime:
                 "relationship", source["persona_id"], source["user_id"]
             )
         styles = []
-        if settings.observes(source["group_id"], source["platform_id"]):
-            styles = await self.db("styles", source["scope_key"], limit=20)
+        local_enabled = settings.observes(source["group_id"], source["platform_id"])
+        global_enabled = settings.uses_global_styles(
+            source["group_id"], source["platform_id"]
+        )
+        if local_enabled or global_enabled:
+            if local_enabled:
+                styles = await self.db("styles", source["scope_key"], limit=20)
+            if global_enabled:
+                styles += await self.db(
+                    "global_styles",
+                    source["persona_id"],
+                    source["scope_key"],
+                    settings.tags_for(source["group_id"], source["platform_id"]),
+                    source["text"],
+                )
             # Suppress learned banter during serious/professional requests.
             if any(
                 word in source["text"]
@@ -590,24 +611,18 @@ class Runtime:
                 styles = []
             else:
                 recent = self._recent_styles.get(source["scope_key"], [])
+                unique = {}
+                for row in styles:
+                    if fits_conversation(row, source["text"]):
+                        unique.setdefault(normalize(row["expression"]), row)
+                styles = list(unique.values())
                 styles = [
-                    row
-                    for row in styles
-                    if row["id"] not in recent
-                    and (
-                        row["expression"] in source["text"]
-                        or any(
-                            w in source["text"] or w in {"闲聊", "日常闲聊", "轻松聊天"}
-                            for context in row["contexts"]
-                            for w in re.split(r"[、，,；;\s]+", context)
-                            if len(w) >= 2
-                        )
-                    )
+                    row for row in styles if normalize(row["expression"]) not in recent
                 ][:2]
                 if len(self._recent_styles) >= 100:
                     self._recent_styles.pop(next(iter(self._recent_styles)))
                 self._recent_styles[source["scope_key"]] = (
-                    recent + [r["id"] for r in styles]
+                    recent + [normalize(r["expression"]) for r in styles]
                 )[-3:]
 
         def compact(row):

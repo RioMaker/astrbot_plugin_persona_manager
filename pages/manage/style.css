@@ -144,6 +144,7 @@ input::placeholder, textarea::placeholder { color: var(--muted); opacity: .8; }
 .group-toggle input { width: 18px; height: 18px; min-height: 0; margin: 0; accent-color: var(--accent); }
 .group-advanced summary { color: var(--muted); padding: 8px 0; }
 .group-advanced .field { padding-top: 10px; }
+.group-tags { margin-top: 14px; }
 .section-heading { justify-content: space-between; margin-bottom: 15px; }
 .section-heading p { margin-bottom: 0; }
 .muted { color: var(--muted); }

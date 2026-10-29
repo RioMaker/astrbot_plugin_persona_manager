@@ -69,7 +69,7 @@ function setAvailability() {
   byId("scope-key").disabled ||= !array(state?.scopes).length;
   byId("config-save").disabled ||= !configDirty || configConflict || !configRevision;
   byId("config-reload").disabled ||= !state?.config;
-  document.querySelectorAll(".group-toggle input").forEach((control) => { control.disabled ||= configConflict || !configRevision; });
+  document.querySelectorAll(".group-toggle input, .group-tags input").forEach((control) => { control.disabled ||= configConflict || !configRevision; });
   document.querySelectorAll("[data-unavailable]").forEach((control) => { control.disabled = true; });
 }
 
@@ -148,7 +148,7 @@ function configValueText(value, schema) {
   return schema.type === "list" ? array(value).join("\n") : string(value);
 }
 
-function updateConfigDirty() {
+function updateConfigDirty({ renderGroups = true } = {}) {
   let count = 0;
   for (const [name, control] of configControls) {
     const changed = configSchema[name].type === "bool" ? control.checked !== configBase[name] : control.value !== configValueText(configBase[name], configSchema[name]);
@@ -159,7 +159,7 @@ function updateConfigDirty() {
   byId("config-dirty").textContent = configConflict ? "后台配置已改变 · 草稿保留中" : count ? `${count} 项未保存修改` : configRevision ? "设置已同步" : "尚未载入配置";
   byId("config-conflict").hidden = !configConflict;
   byId("settings-tab-dot").hidden = !configDirty;
-  renderGroupPicker();
+  if (renderGroups) renderGroupPicker();
   setAvailability();
 }
 
@@ -191,6 +191,30 @@ function setGroupEntry(field, group, selected) {
   control.value = [...entries].sort().join("\n");
 }
 
+function groupTagText(group) {
+  const entries = groupEntries("group_tags");
+  const key = `${group.platform_id}:${group.group_id}=`;
+  const found = entries.find((entry) => entry.startsWith(key)) || entries.find((entry) => entry.startsWith(`${group.group_id}=`));
+  return found ? found.slice(found.indexOf("=") + 1) : "";
+}
+
+function setGroupTags(group, value) {
+  const control = configControls.get("group_tags");
+  if (!control) return;
+  const key = `${group.platform_id}:${group.group_id}`;
+  const entries = groupEntries("group_tags");
+  const legacy = entries.find((entry) => entry.startsWith(`${group.group_id}=`));
+  const kept = entries.filter((entry) => !entry.startsWith(`${key}=`) && !entry.startsWith(`${group.group_id}=`));
+  if (legacy) {
+    array(state?.groups).filter((row) => row.group_id === group.group_id && row.platform_id !== group.platform_id).forEach((row) => {
+      const other = `${row.platform_id}:${row.group_id}=`;
+      if (!kept.some((entry) => entry.startsWith(other))) kept.push(other + legacy.slice(legacy.indexOf("=") + 1));
+    });
+  }
+  if (value.trim()) kept.push(`${key}=${value.trim()}`);
+  control.value = kept.sort().join("\n");
+}
+
 function renderGroupPicker() {
   const target = byId("group-list");
   target.replaceChildren();
@@ -200,6 +224,7 @@ function renderGroupPicker() {
   const flags = (group) => ({
     observation: groupMatches("observation_groups", group),
     memory: groupMatches("memory_groups", group) && !groupMatches("memory_disabled_groups", group),
+    global: groupMatches("global_style_groups", group),
   });
   const selectedCount = groups.filter((group) => Object.values(flags(group)).some(Boolean)).length;
   byId("group-count").textContent = `${groups.length} 个群 · 已选 ${selectedCount}`;
@@ -208,10 +233,10 @@ function renderGroupPicker() {
     ? "当前总开关关闭或学习已暂停。可先选择群，恢复学习后才会收集新样本。"
     : configControls.get("memory_enabled")?.checked === false
       ? "互动记忆总开关已关闭，已选的互动记忆群暂不生效。"
-      : "旁听学梗只学习本群表达；互动记忆只记录已回复的对话，同 QQ 在启用的群间共享认知。关闭开关后保留历史数据，不补学关闭期间的消息。";
+      : "旁听与互动控制采集。全局梗独立控制跨群使用：不启用采集，也不开放白名单；按本群标签筛选同人格已启用表达。本群表达优先。";
   const visible = groups.filter((group) => {
     const selected = Object.values(flags(group)).some(Boolean);
-    return (!query || `${group.group_name || ""} ${group.group_id} ${group.platform_id} ${group.bot_id}`.toLocaleLowerCase().includes(query))
+    return (!query || `${group.group_name || ""} ${group.group_id} ${group.platform_id} ${group.bot_id} ${groupTagText(group)}`.toLocaleLowerCase().includes(query))
       && (filter === "all" || (filter === "selected" ? selected : !selected));
   });
   if (!visible.length) {
@@ -223,11 +248,11 @@ function renderGroupPicker() {
     const title = node("div", "", "group-title");
     title.append(node("h4", group.group_name || "群名待获取"));
     const enabled = flags(group);
-    title.append(node("span", enabled.observation || enabled.memory ? "已选择" : "仅登记", "tag"));
+    title.append(node("span", Object.values(enabled).some(Boolean) ? "已选择" : "仅登记", "tag"));
     const meta = node("p", `群号 ${group.group_id} · 连接 ${group.platform_id} · 机器人 ${group.bot_id}`, "muted small");
     const seen = node("p", `首次发现：${dateText(group.first_seen)} · 最近发现：${dateText(group.last_seen)}${counter(group.member_count) !== null ? ` · ${group.member_count} 人` : ""}`, "muted small");
     const toggles = node("div", "", "group-toggles");
-    for (const [kind, field, labelText] of [["observation", "observation_groups", "旁听学梗"], ["memory", "memory_groups", "互动记忆"]]) {
+    for (const [kind, field, labelText] of [["observation", "observation_groups", "旁听学梗"], ["memory", "memory_groups", "互动记忆"], ["global", "global_style_groups", "允许使用全局梗"]]) {
       const label = node("label", "", "group-toggle");
       const checkbox = node("input");
       checkbox.type = "checkbox";
@@ -247,6 +272,24 @@ function renderGroupPicker() {
       toggles.append(label);
     }
     card.append(title, meta, seen, toggles);
+    const tagField = node("div", "", "field group-tags");
+    const tagInput = node("input");
+    tagInput.type = "text";
+    tagInput.id = `group-tags-${encodeURIComponent(group.platform_id)}-${group.group_id}`;
+    tagInput.value = groupTagText(group);
+    tagInput.placeholder = "如：太鼓达人、轻松、技术交流";
+    tagInput.maxLength = 310;
+    tagInput.disabled = busy || !ready || configConflict || !configRevision;
+    const tagLabel = node("label", "群标签（性格、话题与能力领域）");
+    tagLabel.htmlFor = tagInput.id;
+    const hint = node("p", "最多12个标签，以逗号分隔。匹配梗的含义和适用语境，避用语境优先；未填标签时不使用外群梗。", "field-hint");
+    tagInput.addEventListener("input", () => {
+      if (busy || !ready || configConflict || !configRevision) return;
+      setGroupTags(group, tagInput.value);
+      updateConfigDirty({ renderGroups: false });
+    });
+    tagField.append(tagLabel, tagInput, hint);
+    card.append(tagField);
     if (!group.group_name || group.name_status === "unavailable") card.append(node("p", group.group_name ? "群名为上次缓存；信息查询暂不可用，后续消息会触发重试。" : "群名尚未取得，后续消息会触发查询；仍可按群号选择。", "field-hint"));
     target.append(card);
   });
@@ -351,7 +394,7 @@ function renderConfig({ replace = false } = {}) {
       field.append(node("p", "方向引导学习取舍与表达，不自动改写固定人设，不增加工具能力。", "field-hint"), example);
     }
     configControls.set(name, control);
-    if (["observation_groups", "memory_groups", "memory_disabled_groups"].includes(name)) {
+    if (["observation_groups", "memory_groups", "memory_disabled_groups", "global_style_groups", "group_tags"].includes(name)) {
       const advanced = node("details", "", "wide-field group-advanced");
       advanced.append(node("summary", `高级：${schema.description}（与群开关同步）`), field);
       sections.get(sectionKey).append(advanced);
@@ -684,7 +727,7 @@ function renderStyles() {
     const disabled = style.enabled === false || style.disabled === true || style.status === "disabled";
     const card = node("article", "", "card");
     const head = node("div", "", "item-header");
-    head.append(node("strong", first(style.name, style.meaning, style.situation, style.context, "表达习惯")), node("span", disabled ? "已停用" : first(style.status, "使用中"), "tag"));
+    head.append(node("strong", first(style.name, style.meaning, style.situation, style.context, "表达习惯")), node("span", disabled ? "已停用" : style.status === "active" ? "已启用 · 可供全局匹配" : style.status === "candidate" ? "候选 · 尚不使用" : first(style.status, "使用中"), "tag"));
     const meta = node("div", "", "item-meta");
     addMeta(meta, "学习时间", dateText(first(style.created_at, style.learned_at)));
     addMeta(meta, "适用情境", first(style.contexts, style.situation, style.context));
@@ -694,7 +737,7 @@ function renderStyles() {
     if (!disabled) {
       const actions = node("div", "", "item-actions");
       actions.append(mutationButton("停用此表达", async () => {
-        const confirmed = await ask({ title: "停用群表达", description: "这条表达将停止用于当前群。已有历史版本会保留。", submit: "停用", danger: true });
+        const confirmed = await ask({ title: "停用群表达", description: "这条表达将停止用于本群及全局引用。已有历史版本会保留。", submit: "停用", danger: true });
         if (confirmed) await perform(() => action("style_disable", { style_id: recordId(style) }), "已停用这条表达。");
       }, { danger: true, available: Boolean(recordId(style)) }));
       card.append(actions);
