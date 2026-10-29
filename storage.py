@@ -87,6 +87,13 @@ class Store:
                 accepted INTEGER NOT NULL DEFAULT 0,error_type TEXT NOT NULL DEFAULT '',
                 metadata TEXT NOT NULL DEFAULT '{}');
             CREATE INDEX IF NOT EXISTS learning_usage_day ON learning_usage(day,scope_key,status);
+            CREATE TABLE IF NOT EXISTS known_groups (
+                platform_id TEXT NOT NULL,group_id TEXT NOT NULL,bot_id TEXT NOT NULL,
+                group_name TEXT NOT NULL DEFAULT '',member_count INTEGER,
+                first_seen REAL NOT NULL,last_seen REAL NOT NULL,
+                name_checked_at REAL,name_retry_at REAL NOT NULL DEFAULT 0,
+                name_status TEXT NOT NULL DEFAULT 'pending',
+                PRIMARY KEY(platform_id,group_id));
         """)
         if "extra" not in {x[1] for x in self.db.execute("PRAGMA table_info(sources)")}:
             self.db.execute(
@@ -99,6 +106,84 @@ class Store:
                 "ALTER TABLE memories ADD COLUMN time_text TEXT NOT NULL DEFAULT ''"
             )
         self.db.commit()
+        # Bring existing source groups into the chooser without changing learning
+        # permissions, copying message bodies or inventing unavailable group names.
+        with self.db:
+            self.db.execute("BEGIN IMMEDIATE")
+            if not self.db.execute(
+                "SELECT 1 FROM meta WHERE key='group_catalog_backfill_v1'"
+            ).fetchone():
+                self.db.execute("""
+                    INSERT OR IGNORE INTO known_groups(platform_id,group_id,bot_id,first_seen,last_seen)
+                    SELECT s.platform_id,s.group_id,
+                        (SELECT bot_id FROM sources newer WHERE newer.platform_id=s.platform_id
+                         AND newer.group_id=s.group_id ORDER BY stored_at DESC LIMIT 1),
+                        min(s.stored_at),max(s.stored_at)
+                    FROM sources s GROUP BY s.platform_id,s.group_id
+                """)
+                self.db.execute(
+                    "INSERT INTO meta(key,value) VALUES ('group_catalog_backfill_v1',1)"
+                )
+
+    def record_group(self, info, *, now):
+        with self._lock, self.db:
+            self.db.execute(
+                """
+                INSERT INTO known_groups(platform_id,group_id,bot_id,group_name,first_seen,last_seen)
+                VALUES (?,?,?,?,?,?) ON CONFLICT(platform_id,group_id) DO UPDATE SET
+                    bot_id=excluded.bot_id,last_seen=max(known_groups.last_seen,excluded.last_seen),
+                    group_name=CASE WHEN excluded.group_name<>'' THEN excluded.group_name ELSE known_groups.group_name END
+            """,
+                (
+                    info["platform_id"],
+                    info["group_id"],
+                    info["bot_id"],
+                    info.get("group_name", ""),
+                    now,
+                    now,
+                ),
+            )
+            return dict(
+                self.db.execute(
+                    "SELECT * FROM known_groups WHERE platform_id=? AND group_id=?",
+                    (info["platform_id"], info["group_id"]),
+                ).fetchone()
+            )
+
+    def update_group_info(
+        self, info, *, now, retry_seconds, name="", member_count=None
+    ):
+        with self._lock, self.db:
+            self.db.execute(
+                """
+                UPDATE known_groups SET
+                    group_name=CASE WHEN ?<>'' THEN ? ELSE group_name END,
+                    member_count=CASE WHEN ?<>'' THEN ? ELSE member_count END,
+                    name_checked_at=?,name_retry_at=?,name_status=?
+                WHERE platform_id=? AND group_id=? AND bot_id=?
+            """,
+                (
+                    name,
+                    name,
+                    name,
+                    member_count,
+                    now,
+                    now + retry_seconds,
+                    "available" if name else "unavailable",
+                    info["platform_id"],
+                    info["group_id"],
+                    info["bot_id"],
+                ),
+            )
+
+    def known_groups(self):
+        with self._lock:
+            return [
+                dict(row)
+                for row in self.db.execute(
+                    "SELECT * FROM known_groups ORDER BY last_seen DESC,platform_id,group_id"
+                )
+            ]
 
     def close(self) -> None:
         with self._lock:

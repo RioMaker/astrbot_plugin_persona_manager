@@ -40,7 +40,7 @@ class SavedConfig(dict):
 def test_every_native_setting_has_a_dashboard_control():
     result = page_config({})
     assert set(result["values"]) == set(result["schema"]) == set(SCHEMA)
-    assert len(SCHEMA) == 31
+    assert len(SCHEMA) == 32
     assert all(field["section"] for field in result["schema"].values())
     assert "api_key" not in result["values"]
     assert result["schema"]["daily_token_limit"]["minimum"] == 0
@@ -100,6 +100,8 @@ def test_page_save_persists_and_invalidates_inflight_work_without_touching_core(
                     "evolution_guidance": "少复读，保留有证据的练习目标",
                     "daily_token_limit": 80000,
                     "cheap_learning_windows": ["23:00-07:00"],
+                    "observation_groups": ["qq-main:234567"],
+                    "memory_groups": ["qq-main:456789"],
                 },
             }
             result = await route(env.context, "action")()
@@ -107,6 +109,8 @@ def test_page_save_persists_and_invalidates_inflight_work_without_touching_core(
             persisted = json.loads(cfg.path.read_text(encoding="utf-8"))
             assert persisted["daily_token_limit"] == 80000
             assert persisted["custom_future_field"] == "keep"
+            assert persisted["observation_groups"] == ["qq-main:234567"]
+            assert persisted["memory_groups"] == ["qq-main:456789"]
             assert env.plugin.settings().evolution_guidance.startswith("少复读")
             assert env.plugin.store.epoch() > epoch
             assert env.context.persona_manager.updates == []
@@ -221,7 +225,7 @@ def test_state_exposes_settings_and_safe_selector_labels_only(entry):
             ]
             result = await route(env.context, "state")()
             assert result.status_code == 200
-            assert len(result["config"]["schema"]) == 31
+            assert len(result["config"]["schema"]) == 32
             assert result["choices"]["providers"] == [
                 {"id": "existing-model", "label": "existing-model"}
             ]

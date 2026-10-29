@@ -66,6 +66,12 @@
         <div class="section-heading"><div><h2 id="settings-title">设置与进化方向</h2><p class="muted">保存后用于后续学习。群触发仍交给现有白名单，私聊保持关闭。</p></div><span id="settings-count" class="count">载入配置中</span></div>
         <div id="config-conflict" class="notice error" role="alert" hidden>后台配置已有变化。草稿已保留，请重载最新配置并核对后再编辑。</div>
         <form id="settings-form">
+          <article class="card group-picker" aria-labelledby="group-picker-title">
+            <div class="item-header"><div><h3 id="group-picker-title">选择学习的群</h3><p class="muted small">收到群消息后自动登记群名和群号，新群的两个开关默认关闭。勾选后点击“保存设置”；学习仍须通过原有门禁。</p></div><span id="group-count" class="count">0 个群</span></div>
+            <div class="group-filters"><div class="field grow"><label for="group-search">搜索群</label><input id="group-search" type="search" placeholder="群名、群号或平台连接" autocomplete="off" /></div><div class="field"><label for="group-filter">显示范围</label><select id="group-filter"><option value="all">所有已发现的群</option><option value="selected">已选择学习</option><option value="unselected">两个开关均关闭</option></select></div></div>
+            <p id="group-learning-note" class="muted small"></p>
+            <div id="group-list" class="group-list" aria-live="polite"></div>
+          </article>
           <nav id="settings-nav" class="settings-nav" aria-label="配置分组"></nav>
           <div id="settings-sections" class="settings-sections"></div>
           <div class="settings-savebar card"><div><strong id="config-dirty">尚未载入配置</strong><p class="muted small">与 AstrBot 插件配置使用同一份设置。</p></div><div class="header-actions"><button id="config-reload" type="button" disabled>重载配置</button><button id="config-save" type="submit" class="primary" disabled>保存设置</button></div></div>

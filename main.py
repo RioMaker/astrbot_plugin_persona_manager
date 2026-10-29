@@ -20,6 +20,7 @@ from astrbot.core.star.session_plugin_manager import SessionPluginManager
 from astrbot.core.utils.astrbot_path import get_astrbot_data_path
 
 from .configuration import page_config, revision, usage_for_page, validate_changes
+from .groups import GroupDiscovery
 from .ingress import group_identity, sample
 from .runtime import CONTEXT_MARKER, Runtime
 from .settings import Settings
@@ -51,6 +52,7 @@ class PersonaManagerPlugin(Star):
             source_guard=self._source_allowed,
         )
         self._debug = {}
+        self.discovery = GroupDiscovery(self.runtime)
         for endpoint, method, handler in (
             ("state", "GET", self.page_state),
             ("seed", "GET", self.page_seed),
@@ -65,6 +67,14 @@ class PersonaManagerPlugin(Star):
 
     async def initialize(self):
         self.runtime.start()
+
+    @filter.event_message_type(filter.EventMessageType.ALL, priority=10002)
+    async def discover_groups(self, event: AstrMessageEvent):
+        """Before Access Gate: metadata only, never read chat bodies or wake the bot."""
+        try:
+            await self.discovery.observe(event)
+        except Exception:
+            logger.warning("[可可子人格] 群目录更新失败，继续原消息流程。")
 
     def _gate_loaded(self, event=None) -> bool:
         plugins = getattr(event, "plugins_name", None)
@@ -406,6 +416,7 @@ class PersonaManagerPlugin(Star):
             return json_response(
                 {
                     "config": page_config(self.config),
+                    "groups": await self.runtime.db("known_groups"),
                     "choices": await self._page_choices(),
                     "usage": usage_for_page(usage, self.settings()),
                     "schedule": self.runtime.scheduler_status,
@@ -585,4 +596,5 @@ class PersonaManagerPlugin(Star):
 
     async def terminate(self):
         self._debug.clear()
+        await self.discovery.close()
         await self.runtime.close()

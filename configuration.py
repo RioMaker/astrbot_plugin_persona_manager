@@ -18,6 +18,7 @@ SECTIONS = {
         "persona_id",
         "observation_groups",
         "memory_enabled",
+        "memory_groups",
         "memory_disabled_groups",
         "ignored_qq",
     },
@@ -133,7 +134,11 @@ def validate_changes(current, changes) -> dict:
         thresholds.append("min_observation_batch")
         if result["price_aware_learning"] and result["cheap_learning_windows"]:
             thresholds.append("cheap_observation_batch")
-    if result["memory_enabled"] and result["price_aware_learning"]:
+    if (
+        result["memory_enabled"]
+        and result["memory_groups"]
+        and result["price_aware_learning"]
+    ):
         thresholds.append("regular_interaction_batch")
         if result["cheap_learning_windows"]:
             thresholds.append("cheap_interaction_batch")

@@ -69,6 +69,10 @@ function page(options = {}) {
 
 const flush = () => new Promise((resolve) => setImmediate(resolve));
 const textOf = (element) => [element.textContent || "", ...element.children.map(textOf)].join(" ");
+const knownGroup = (platform = "qq-main", groupId = "234567", name = "鼓友练习群") => ({
+  platform_id: platform, group_id: groupId, group_name: name, bot_id: "345678",
+  first_seen: 1793246400, last_seen: 1793246400, member_count: 42, name_status: "available",
+});
 function edit(ui, key, value) {
   const field = ui.elements.get(`setting-${key}`);
   if (field.type === "checkbox") field.checked = value;
@@ -243,4 +247,91 @@ test("direction example only changes the local draft", async () => {
   assert.match(ui.elements.get("setting-evolution_guidance").value, /少复读/);
   assert.equal(ui.posts.length, 0);
   assert.equal(ui.elements.get("config-dirty").textContent, "1 项未保存修改");
+});
+
+test("discovered groups show names and start with two unselected switches", async () => {
+  const ui = page(); await flush();
+  ui.view.groups = [knownGroup()];
+  await vm.runInContext("loadState()", ui.sandbox);
+  const text = textOf(ui.elements.get("group-list"));
+  assert.match(text, /鼓友练习群/);
+  assert.match(text, /234567/);
+  assert.match(text, /qq-main/);
+  assert.match(text, /42 人/);
+  assert.equal(ui.elements.get("group-observation-qq-main-234567").checked, false);
+  assert.equal(ui.elements.get("group-memory-qq-main-234567").checked, false);
+  assert.equal(ui.posts.length, 0);
+});
+
+test("group switches save independent native settings without typing IDs", async () => {
+  const ui = page(); await flush();
+  ui.view.groups = [knownGroup(), knownGroup("qq-main", "456789", "另一个群")];
+  await vm.runInContext("loadState()", ui.sandbox);
+  for (const key of ["group-observation-qq-main-234567", "group-memory-qq-main-456789"]) {
+    const control = ui.elements.get(key); control.checked = true; control.handlers.change();
+  }
+  await vm.runInContext("loadState()", ui.sandbox);
+  assert.equal(ui.elements.get("group-memory-qq-main-456789").checked, true);
+  await ui.elements.get("settings-form").handlers.submit({ preventDefault() {} });
+  assert.deepEqual(ui.posts[0].payload.values, {observation_groups:["qq-main:234567"], memory_groups:["qq-main:456789"]});
+});
+
+test("disabling one connection preserves another connection and unrelated legacy IDs", async () => {
+  const ui = page(); await flush();
+  ui.view.groups = [knownGroup(), knownGroup("qq-second")];
+  ui.view.config.values.observation_groups = ["234567", "777888"];
+  await vm.runInContext("loadState()", ui.sandbox);
+  const control = ui.elements.get("group-observation-qq-main-234567");
+  control.checked = false; control.handlers.change();
+  assert.equal(ui.elements.get("group-observation-qq-second-234567").checked, true);
+  await ui.elements.get("settings-form").handlers.submit({ preventDefault() {} });
+  assert.deepEqual(ui.posts[0].payload.values.observation_groups, ["777888", "qq-second:234567"]);
+});
+
+test("memory switch clears only the matching legacy exclusion", async () => {
+  const ui = page(); await flush();
+  ui.view.groups = [knownGroup(), knownGroup("qq-second")];
+  ui.view.config.values.memory_disabled_groups = ["234567", "777888"];
+  await vm.runInContext("loadState()", ui.sandbox);
+  const control = ui.elements.get("group-memory-qq-main-234567");
+  control.checked = true; control.handlers.change();
+  await ui.elements.get("settings-form").handlers.submit({ preventDefault() {} });
+  assert.deepEqual(ui.posts[0].payload.values.memory_groups, ["qq-main:234567"]);
+  assert.deepEqual(ui.posts[0].payload.values.memory_disabled_groups, ["777888", "qq-second:234567"]);
+});
+
+test("group search and selection filter preserve all hidden selections", async () => {
+  const ui = page(); await flush();
+  ui.view.groups = [knownGroup(), knownGroup("qq-main", "456789", "读书群")];
+  ui.view.config.values.memory_groups = ["qq-main:456789"];
+  await vm.runInContext("loadState()", ui.sandbox);
+  ui.elements.get("group-search").value = "鼓友";
+  ui.elements.get("group-search").handlers.input();
+  assert.match(textOf(ui.elements.get("group-list")), /鼓友/);
+  assert.doesNotMatch(textOf(ui.elements.get("group-list")), /读书/);
+  ui.elements.get("group-search").value = "";
+  ui.elements.get("group-filter").value = "selected";
+  ui.elements.get("group-filter").handlers.change();
+  assert.match(textOf(ui.elements.get("group-list")), /读书/);
+  assert.doesNotMatch(textOf(ui.elements.get("group-list")), /鼓友/);
+  assert.equal(ui.elements.get("setting-memory_groups").value, "qq-main:456789");
+  assert.equal(ui.posts.length, 0);
+});
+
+test("group metadata refresh keeps draft and revision conflict blocks new toggles", async () => {
+  const ui = page(); await flush();
+  ui.view.groups = [knownGroup()];
+  await vm.runInContext("loadState()", ui.sandbox);
+  let control = ui.elements.get("group-observation-qq-main-234567");
+  control.checked = true; control.handlers.change();
+  ui.view.groups[0].group_name = "<img src=x onerror=alert(1)>";
+  ui.view.config.revision = "other-editor";
+  await vm.runInContext("loadState()", ui.sandbox);
+  assert.match(textOf(ui.elements.get("group-list")), /<img src=x/);
+  control = ui.elements.get("group-memory-qq-main-234567");
+  assert.equal(control.disabled, true);
+  control.checked = true; control.handlers.change();
+  assert.equal(ui.elements.get("setting-memory_groups").value, "");
+  assert.equal(ui.elements.get("setting-observation_groups").value, "qq-main:234567");
+  assert.equal(ui.posts.length, 0);
 });

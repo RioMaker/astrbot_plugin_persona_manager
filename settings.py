@@ -47,6 +47,7 @@ class Settings:
     persona_id: str = "可可子"
     observation_groups: frozenset[str] = field(default_factory=frozenset)
     memory_enabled: bool = True
+    memory_groups: frozenset[str] = field(default_factory=frozenset)
     memory_disabled_groups: frozenset[str] = field(default_factory=frozenset)
     ignored_qq: frozenset[str] = field(default_factory=frozenset)
     learning_enabled: bool = True
@@ -89,7 +90,12 @@ class Settings:
         values["learning_provider_id"] = str(
             config.get("learning_provider_id", "") or ""
         ).strip()
-        for name in ("observation_groups", "memory_disabled_groups", "ignored_qq"):
+        for name in (
+            "observation_groups",
+            "memory_groups",
+            "memory_disabled_groups",
+            "ignored_qq",
+        ):
             values[name] = entries(config.get(name, []))
         for name in ("learning_windows", "cheap_learning_windows"):
             raw = config.get(name, [])
@@ -111,6 +117,8 @@ class Settings:
         return self.group_in(group_id, platform_id, self.observation_groups)
 
     def remembers(self, group_id: str, platform_id: str) -> bool:
-        return self.memory_enabled and not self.group_in(
-            group_id, platform_id, self.memory_disabled_groups
+        return (
+            self.memory_enabled
+            and self.group_in(group_id, platform_id, self.memory_groups)
+            and not self.group_in(group_id, platform_id, self.memory_disabled_groups)
         )

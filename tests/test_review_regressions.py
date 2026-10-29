@@ -41,7 +41,7 @@ def test_context_drops_snapshot_invalidated_after_profile_read(tmp_path, mutatio
     runtime = Runtime(
         store,
         object(),
-        lambda: Settings(persona_id="cocoa"),
+        lambda: Settings(persona_id="cocoa", memory_groups=frozenset({"8888"})),
         logging.getLogger(__name__),
     )
     original_db = runtime.db

@@ -40,7 +40,10 @@ def entry(monkeypatch, tmp_path):
     @asynccontextmanager
     async def running(config=None, context=None):
         context = context or stub.context()
-        plugin = module.PersonaManagerPlugin(context, config or {})
+        # Existing integration scenarios explicitly enable their test groups.
+        if config is None:
+            config = {"memory_groups": ["234567", "456789"]}
+        plugin = module.PersonaManagerPlugin(context, config)
         await plugin.initialize()
         try:
             yield SimpleNamespace(
@@ -122,7 +125,10 @@ def test_real_runtime_retrieves_same_qq_across_groups_but_not_other_users(tmp_pa
         store = Store(tmp_path / "memory.sqlite3")
         context = MockContext()
         runtime = Runtime(
-            store, context, lambda: Settings(), logging.getLogger(__name__)
+            store,
+            context,
+            lambda: Settings(memory_groups=frozenset({"234567", "456789"})),
+            logging.getLogger(__name__),
         )
         try:
             original = sample(MockEvent(group_id="234567"), Settings(), "interaction")
@@ -552,7 +558,11 @@ def test_actual_gate_then_persona_preserves_routing_and_private_zero_cost(
         )
         event._has_send_oper = False
         async with entry.running(
-            {"observation_groups": ["234567", "456789"]}, context
+            {
+                "observation_groups": ["234567", "456789"],
+                "memory_groups": ["234567", "456789"],
+            },
+            context,
         ) as env:
             await gate.enforce_access(event)
             await gate.route_wake(event)

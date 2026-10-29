@@ -109,6 +109,7 @@ def harness(tmp_path, monkeypatch):
             persona_id="cocoa",
             observation_groups=frozenset({"g1", "g2"}),
             min_observation_batch=2,
+            memory_groups=frozenset({"g1", "g2", "blocked"}),
             price_aware_learning=False,
         )
     ]
@@ -329,6 +330,30 @@ def test_removing_observation_whitelist_while_model_runs_discards_result(harness
     asyncio.run(scenario())
     assert harness.store.styles("qq1:999:g1", status=None) == []
     assert len(harness.store.pending_sources()) == 2
+
+
+def test_disabling_group_memory_during_learning_discards_result_and_stops_recall(
+    harness,
+):
+    harness.store.add_source(sample(harness))
+    harness.context.block = True
+
+    async def run():
+        task = asyncio.create_task(harness.runtime.run_once())
+        await asyncio.wait_for(harness.context.started.wait(), timeout=2)
+        harness.config[0] = replace(harness.config[0], memory_groups=frozenset())
+        harness.context.release.set()
+        await task
+        await harness.runtime.capture(sample(harness, "off", text="以后回答简短"))
+        _, trace = await harness.runtime.chat_context(sample(harness, "recall"))
+        assert trace["memory_ids"] == []
+
+    asyncio.run(run())
+    assert harness.store.profile("cocoa", "123") == []
+    assert harness.store.get_source("off") is None
+    assert (
+        harness.store.usage_report("2026-10-29")["recent"][0]["status"] == "discarded"
+    )
 
 
 def test_pause_while_model_runs_discards_result(harness):
