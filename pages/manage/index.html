@@ -1,0 +1,113 @@
+<!doctype html>
+<html lang="zh-CN">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <meta name="color-scheme" content="light dark" />
+    <title>可可子 · 人格管理</title>
+    <link rel="stylesheet" href="./style.css" />
+  </head>
+  <body>
+    <main class="shell" id="app" aria-busy="true">
+      <header class="page-header">
+        <div class="heading-copy">
+          <p class="eyebrow">PERSONA MANAGER</p>
+          <h1>可可子的人格管理</h1>
+          <p class="lead">维护核心人设，查看有来源的记忆，管理各群的表达习惯。</p>
+        </div>
+        <div class="header-actions">
+          <span class="status-pill" id="learning-status">正在连接</span>
+          <button id="learning-toggle" type="button" disabled>暂停学习</button>
+          <button id="refresh" type="button" disabled>刷新</button>
+        </div>
+      </header>
+
+      <div id="notice" class="notice" role="status" aria-live="polite" hidden></div>
+
+      <form class="persona-bar card" id="persona-form">
+        <div class="field grow">
+          <label for="persona-id">当前人格 ID</label>
+          <input id="persona-id" autocomplete="off" placeholder="留空使用插件配置的人格" maxlength="200" />
+        </div>
+        <button type="submit" class="primary" disabled>载入人格</button>
+        <p id="persona-caption" class="muted small">等待 Dashboard 连接。</p>
+      </form>
+
+      <nav class="tabs" aria-label="管理内容">
+        <button type="button" class="tab active" data-panel="core" aria-current="page">核心人设</button>
+        <button type="button" class="tab" data-panel="memory">用户记忆</button>
+        <button type="button" class="tab" data-panel="style">群表达</button>
+      </nav>
+
+      <section id="panel-core" aria-labelledby="core-title">
+        <div class="section-heading">
+          <div><h2 id="core-title">稳定的人格核心</h2><p class="muted">在这里编辑身份与行为边界，学习得到的群表达单独管理。</p></div>
+          <span id="core-version-count" class="count">0 个版本</span>
+        </div>
+        <div class="core-grid">
+          <form id="core-form" class="card editor-card">
+            <div class="field grow">
+              <label for="core-content">核心人设内容</label>
+              <textarea id="core-content" rows="22" maxlength="16000" spellcheck="false" placeholder="载入后显示当前核心人设。" disabled></textarea>
+            </div>
+            <div class="form-footer"><span id="core-dirty" class="muted small">尚未载入</span><div class="header-actions"><button id="core-seed" type="button" disabled>载入推荐核心</button><button type="submit" class="primary" disabled>保存为新版本</button></div></div>
+          </form>
+          <aside class="card version-card" aria-labelledby="core-history-title">
+            <h3 id="core-history-title">版本记录</h3>
+            <p class="muted small">先预览内容，再恢复需要的版本。</p>
+            <label class="sr-only" for="core-versions">选择核心人设版本</label>
+            <select id="core-versions" disabled><option value="">暂无版本</option></select>
+            <pre id="core-version-preview" class="version-preview">尚未载入版本。</pre>
+            <button id="core-rollback" type="button" disabled>恢复此版本</button>
+          </aside>
+        </div>
+      </section>
+
+      <section id="panel-memory" aria-labelledby="memory-title" hidden>
+        <div class="section-heading"><div><h2 id="memory-title">用户记忆与时间线</h2><p class="muted">按 QQ 号检索，核对来源与时间后纠正记忆。</p></div><span id="memory-count" class="count">0 条记忆</span></div>
+        <form id="user-form" class="card filter-bar">
+          <div class="field grow"><label for="user-id">用户 QQ 号</label><input id="user-id" type="text" inputmode="numeric" autocomplete="off" maxlength="100" placeholder="输入需要查看的 QQ 号" /></div>
+          <button type="submit" class="primary" disabled>检索记忆</button>
+          <button id="user-forget" type="button" class="danger subtle" disabled>删除此用户记忆</button>
+        </form>
+        <div id="profile" class="card profile-card" hidden></div>
+        <div class="timeline" id="memories"><p class="empty">输入 QQ 号后查看该用户的记忆。</p></div>
+      </section>
+
+      <section id="panel-style" aria-labelledby="style-title" hidden>
+        <div class="section-heading"><div><h2 id="style-title">按群管理表达习惯</h2><p class="muted">查看学习到的表达与适用场景，可停用单条或恢复历史版本。</p></div><span id="style-count" class="count">0 条表达</span></div>
+        <form id="scope-form" class="card filter-bar">
+          <div class="field grow"><label for="scope-key">群与平台</label><select id="scope-key" disabled><option value="">请选择群</option></select></div>
+          <button type="submit" class="primary" disabled>查看群表达</button>
+        </form>
+        <div class="style-grid">
+          <div id="styles" class="stack"><p class="empty">选择一个群后查看表达习惯。</p></div>
+          <aside class="card version-card" aria-labelledby="style-history-title">
+            <h3 id="style-history-title">群表达版本</h3>
+            <label class="sr-only" for="style-versions">选择群表达版本</label>
+            <select id="style-versions" disabled><option value="">暂无版本</option></select>
+            <pre id="style-version-preview" class="version-preview">尚未载入版本。</pre>
+            <button id="style-rollback" type="button" disabled>恢复此版本</button>
+          </aside>
+        </div>
+      </section>
+
+      <details class="diagnostics"><summary>运行状态</summary><pre id="status-detail">等待连接。</pre></details>
+      <footer class="page-footer">管理操作通过已登录的 AstrBot Dashboard 执行。时间显示为北京时间。</footer>
+    </main>
+
+    <dialog id="action-dialog" aria-labelledby="dialog-title">
+      <form id="dialog-form">
+        <h2 id="dialog-title">确认操作</h2>
+        <p id="dialog-description" class="muted"></p>
+        <div id="dialog-content-field" class="field" hidden><label for="dialog-content">修正后的记忆（最多 600 字）</label><textarea id="dialog-content" rows="6" maxlength="600"></textarea></div>
+        <div id="dialog-state-field" class="field" hidden><label for="dialog-state">记忆状态</label><select id="dialog-state"><option value="active">当前有效（偏好或习惯）</option><option value="asserted">已陈述（尚未明确进度）</option><option value="planned">计划中（尚未完成）</option><option value="in_progress">进行中</option><option value="completed">已完成</option><option value="cancelled">已取消</option></select></div>
+        <div id="dialog-time-field" class="field" hidden><label for="dialog-time">时间说明（可选）</label><input id="dialog-time" maxlength="100" placeholder="例如：2026 年 10 月开始；不确定时留空" /></div>
+        <div id="dialog-confirm-field" class="field" hidden><label for="dialog-confirm">输入该用户 QQ 号以确认</label><input id="dialog-confirm" autocomplete="off" /></div>
+        <p id="dialog-error" class="field-error" role="alert" hidden></p>
+        <div class="dialog-actions"><button id="dialog-cancel" type="button">取消</button><button id="dialog-submit" type="submit" class="primary">确认</button></div>
+      </form>
+    </dialog>
+    <script type="module" src="./app.js"></script>
+  </body>
+</html>

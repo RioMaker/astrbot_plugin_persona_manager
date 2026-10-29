@@ -1,0 +1,10 @@
+__pycache__/
+.pytest_cache/
+.ruff_cache/
+.devtools/
+.venv/
+*.py[cod]
+*.sqlite*
+*.db
+htmlcov/
+.coverage

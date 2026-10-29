@@ -1,0 +1,21 @@
+{
+  "enabled": {"type": "bool", "description": "启用可可子人格管理", "default": true},
+  "persona_id": {"type": "string", "description": "目标原生人格", "default": "可可子", "_special": "select_persona", "hint": "仅匹配实际选中的人格；不会自动改写原生人格。"},
+  "observation_groups": {"type": "list", "description": "旁听群白名单", "default": [], "hint": "每项填写群号，或 平台实例ID:群号。空列表不旁听；必须先通过现有独立白名单门禁。"},
+  "memory_enabled": {"type": "bool", "description": "记录与可可子的群内互动", "default": true, "hint": "真实QQ相同即可跨群认识。仅记录门禁放行并实际回复的主聊天；与旁听白名单独立。"},
+  "memory_disabled_groups": {"type": "list", "description": "不记录和使用人物记忆的群", "default": [], "hint": "填写群号或 平台实例ID:群号。私聊始终不启用，无需配置。"},
+  "ignored_qq": {"type": "list", "description": "忽略的QQ号", "default": [], "hint": "请加入菌菌等其他机器人QQ；本机器人自身自动排除。"},
+  "learning_enabled": {"type": "bool", "description": "允许收集与自动学习", "default": true, "hint": "关闭后不新增样本、不调用学习模型；仍可使用已有记忆。管理页也可暂停学习。"},
+  "learning_provider_id": {"type": "string", "description": "后台学习模型", "default": "", "_special": "select_provider", "hint": "留空跟随源群当前聊天模型。只用于批量结构化抽取，不带主对话历史和工具。"},
+  "learning_interval_seconds": {"type": "int", "description": "同类学习批次最小间隔（秒）", "default": 1800, "hint": "60～86400。旁听按群、相处记忆按群中用户分别冷却。"},
+  "min_observation_batch": {"type": "int", "description": "旁听最少样本条数", "default": 20, "hint": "2～100。少量聊天不会立即产生额外模型请求。"},
+  "batch_size": {"type": "int", "description": "单批最多消息数", "default": 30, "hint": "1～100。"},
+  "daily_calls": {"type": "int", "description": "全部群每日学习模型调用上限", "default": 12, "hint": "0～100；按北京时间日重置，0不调用模型。失败调用也计预算。"},
+  "daily_group_calls": {"type": "int", "description": "每群每日学习模型调用上限", "default": 4, "hint": "0～20；旁听和相处抽取共用。"},
+  "model_timeout_seconds": {"type": "int", "description": "单次学习超时（秒）", "default": 45, "hint": "5～120。"},
+  "max_source_chars": {"type": "int", "description": "每条采集正文长度上限", "default": 600, "hint": "100～2000。不读取引用或转发正文。"},
+  "max_batch_chars": {"type": "int", "description": "单批原文总长度上限", "default": 12000, "hint": "1000～24000；为字符预算，并非精确token计费。"},
+  "max_context_chars": {"type": "int", "description": "回复时动态上下文长度上限", "default": 1800, "hint": "300～4000；优先保留当前认知，按完整条目裁减。"},
+  "observation_retention_hours": {"type": "int", "description": "旁听原文保留小时数", "default": 48, "hint": "1～168。到期清理原文，保留必要的非正文来源标识防止重复学习。"},
+  "interaction_retention_days": {"type": "int", "description": "互动原文保留天数", "default": 7, "hint": "1～30。已形成的记忆摘要单独管理，可在面板遗忘。"}
+}

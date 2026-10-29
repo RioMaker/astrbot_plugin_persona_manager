@@ -1,0 +1,10 @@
+name: astrbot_plugin_persona_manager
+display_name: 可可子人格管理
+short_desc: 群内表达学习、同 QQ 跨群相处记忆与时间线。
+desc: 沿用独立白名单门禁，仅在 QQ 群中管理固定人格、自动表达学习、跨群人物记忆和可追溯时间线，支持管理面板与回滚。
+version: "0.1.0"
+author: Rio
+repo: ""
+astrbot_version: ">=4.24.0,<5"
+support_platforms:
+  - aiocqhttp
