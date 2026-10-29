@@ -92,6 +92,23 @@ class Runtime:
     async def db(self, method: str, *args, **kwargs):
         return await asyncio.to_thread(getattr(self.store, method), *args, **kwargs)
 
+    async def _reserve_learning(self, *args, **kwargs):
+        # Cancelling to_thread does not stop SQLite. Keep the result so an unload
+        # between commit and delivery of the reservation ID can still refund it.
+        pending = asyncio.create_task(self.db("reserve_learning", *args, **kwargs))
+        try:
+            return await asyncio.shield(pending)
+        except asyncio.CancelledError:
+            try:
+                reservation = await pending
+                if reservation is not None:
+                    await self.db("release_learning", reservation, not_sent=True)
+            except Exception:
+                self.logger.warning(
+                    "[可可子人格] 未发出预留清理失败，保守保留未知用量。"
+                )
+            raise
+
     def start(self):
         if not self.closed and (self.task is None or self.task.done()):
             self.task = asyncio.create_task(
@@ -338,8 +355,7 @@ class Runtime:
                 if len(selected) >= policy["minimum"]
                 else "max_wait",
             }
-            reservation = await self.db(
-                "reserve_learning",
+            reservation = await self._reserve_learning(
                 day,
                 scope,
                 persona_id=settings.persona_id,

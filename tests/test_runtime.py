@@ -846,6 +846,38 @@ def test_revocation_after_reservation_releases_unsent_call_and_tokens(harness):
     assert report["recent"][0]["status"] == "released"
 
 
+def test_cancellation_after_sqlite_reserve_commit_refunds_unsent_work(harness):
+    harness.store.add_source(sample(harness))
+    original_db = harness.runtime.db
+
+    async def run():
+        committed = asyncio.Event()
+        deliver_id = asyncio.Event()
+
+        async def delay_reservation_result(method, *args, **kwargs):
+            result = await original_db(method, *args, **kwargs)
+            if method == "reserve_learning":
+                committed.set()
+                await deliver_id.wait()
+            return result
+
+        harness.runtime.db = delay_reservation_result
+        task = asyncio.create_task(harness.runtime.run_once())
+        await asyncio.wait_for(committed.wait(), timeout=2)
+        task.cancel()
+        await asyncio.sleep(0)
+        deliver_id.set()
+        with pytest.raises(asyncio.CancelledError):
+            await task
+
+    asyncio.run(run())
+    assert harness.context.calls == []
+    report = harness.store.usage_report("2026-10-29")
+    assert report["global_call_budget_used"] == 0
+    assert report["global_token_budget_used"] == 0
+    assert report["recent"][0]["status"] == "released"
+
+
 def test_discount_retries_use_discount_interval_without_bypassing_it(harness):
     harness.config[0] = replace(
         harness.config[0],
