@@ -1,21 +1,189 @@
 {
-  "enabled": {"type": "bool", "description": "启用可可子人格管理", "default": true},
-  "persona_id": {"type": "string", "description": "目标原生人格", "default": "可可子", "_special": "select_persona", "hint": "仅匹配实际选中的人格；不会自动改写原生人格。"},
-  "observation_groups": {"type": "list", "description": "旁听群白名单", "default": [], "hint": "每项填写群号，或 平台实例ID:群号。空列表不旁听；必须先通过现有独立白名单门禁。"},
-  "memory_enabled": {"type": "bool", "description": "记录与可可子的群内互动", "default": true, "hint": "真实QQ相同即可跨群认识。仅记录门禁放行并实际回复的主聊天；与旁听白名单独立。"},
-  "memory_disabled_groups": {"type": "list", "description": "不记录和使用人物记忆的群", "default": [], "hint": "填写群号或 平台实例ID:群号。私聊始终不启用，无需配置。"},
-  "ignored_qq": {"type": "list", "description": "忽略的QQ号", "default": [], "hint": "请加入菌菌等其他机器人QQ；本机器人自身自动排除。"},
-  "learning_enabled": {"type": "bool", "description": "允许收集与自动学习", "default": true, "hint": "关闭后不新增样本、不调用学习模型；仍可使用已有记忆。管理页也可暂停学习。"},
-  "learning_provider_id": {"type": "string", "description": "后台学习模型", "default": "", "_special": "select_provider", "hint": "留空跟随源群当前聊天模型。只用于批量结构化抽取，不带主对话历史和工具。"},
-  "learning_interval_seconds": {"type": "int", "description": "同类学习批次最小间隔（秒）", "default": 1800, "hint": "60～86400。旁听按群、相处记忆按群中用户分别冷却。"},
-  "min_observation_batch": {"type": "int", "description": "旁听最少样本条数", "default": 20, "hint": "2～100。少量聊天不会立即产生额外模型请求。"},
-  "batch_size": {"type": "int", "description": "单批最多消息数", "default": 30, "hint": "1～100。"},
-  "daily_calls": {"type": "int", "description": "全部群每日学习模型调用上限", "default": 12, "hint": "0～100；按北京时间日重置，0不调用模型。失败调用也计预算。"},
-  "daily_group_calls": {"type": "int", "description": "每群每日学习模型调用上限", "default": 4, "hint": "0～20；旁听和相处抽取共用。"},
-  "model_timeout_seconds": {"type": "int", "description": "单次学习超时（秒）", "default": 45, "hint": "5～120。"},
-  "max_source_chars": {"type": "int", "description": "每条采集正文长度上限", "default": 600, "hint": "100～2000。不读取引用或转发正文。"},
-  "max_batch_chars": {"type": "int", "description": "单批原文总长度上限", "default": 12000, "hint": "1000～24000；为字符预算，并非精确token计费。"},
-  "max_context_chars": {"type": "int", "description": "回复时动态上下文长度上限", "default": 1800, "hint": "300～4000；优先保留当前认知，按完整条目裁减。"},
-  "observation_retention_hours": {"type": "int", "description": "旁听原文保留小时数", "default": 48, "hint": "1～168。到期清理原文，保留必要的非正文来源标识防止重复学习。"},
-  "interaction_retention_days": {"type": "int", "description": "互动原文保留天数", "default": 7, "hint": "1～30。已形成的记忆摘要单独管理，可在面板遗忘。"}
+  "enabled": {
+    "type": "bool",
+    "description": "启用可可子人格管理",
+    "default": true
+  },
+  "persona_id": {
+    "type": "string",
+    "description": "目标原生人格",
+    "default": "可可子",
+    "_special": "select_persona",
+    "hint": "仅匹配实际选中的人格；不会自动改写原生人格。"
+  },
+  "observation_groups": {
+    "type": "list",
+    "description": "旁听群白名单",
+    "default": [],
+    "hint": "每项填写群号，或 平台实例ID:群号。空列表不旁听；必须先通过现有独立白名单门禁。"
+  },
+  "memory_enabled": {
+    "type": "bool",
+    "description": "记录与可可子的群内互动",
+    "default": true,
+    "hint": "真实QQ相同即可跨群认识。仅记录门禁放行并实际回复的主聊天；与旁听白名单独立。"
+  },
+  "memory_disabled_groups": {
+    "type": "list",
+    "description": "不记录和使用人物记忆的群",
+    "default": [],
+    "hint": "填写群号或 平台实例ID:群号。私聊始终不启用，无需配置。"
+  },
+  "ignored_qq": {
+    "type": "list",
+    "description": "忽略的QQ号",
+    "default": [],
+    "hint": "请加入菌菌等其他机器人QQ；本机器人自身自动排除。"
+  },
+  "learning_enabled": {
+    "type": "bool",
+    "description": "允许收集与自动学习",
+    "default": true,
+    "hint": "关闭后不新增样本、不调用学习模型；仍可使用已有记忆。管理页也可暂停学习。"
+  },
+  "learning_provider_id": {
+    "type": "string",
+    "description": "后台学习模型",
+    "default": "",
+    "_special": "select_provider",
+    "hint": "留空跟随源群当前聊天模型。只用于批量结构化抽取，不带主对话历史和工具。"
+  },
+  "learning_interval_seconds": {
+    "type": "int",
+    "description": "常规价学习间隔（秒）",
+    "default": 1800,
+    "hint": "60～86400。旁听按群、相处记忆按群中用户分别冷却。"
+  },
+  "min_observation_batch": {
+    "type": "int",
+    "description": "常规价旁听批量门槛",
+    "default": 20,
+    "hint": "2～60。常规价积累到此数量再提取群表达；最长等待可允许较小批次。"
+  },
+  "batch_size": {
+    "type": "int",
+    "description": "单批最多消息数",
+    "default": 30,
+    "hint": "1～60；应不小于各类批量门槛。"
+  },
+  "daily_calls": {
+    "type": "int",
+    "description": "全部群每日学习模型调用上限",
+    "default": 12,
+    "hint": "0～100；按北京时间日重置，0不调用模型。失败调用也计预算。"
+  },
+  "daily_group_calls": {
+    "type": "int",
+    "description": "每群每日学习模型调用上限",
+    "default": 4,
+    "hint": "0～20；旁听和相处抽取共用。"
+  },
+  "model_timeout_seconds": {
+    "type": "int",
+    "description": "单次学习超时（秒）",
+    "default": 45,
+    "hint": "5～120。"
+  },
+  "max_source_chars": {
+    "type": "int",
+    "description": "每条采集正文长度上限",
+    "default": 600,
+    "hint": "100～2000。不读取引用或转发正文。"
+  },
+  "max_batch_chars": {
+    "type": "int",
+    "description": "单批原文总长度上限",
+    "default": 12000,
+    "hint": "1000～24000；为字符预算，并非精确token计费。"
+  },
+  "max_context_chars": {
+    "type": "int",
+    "description": "回复时动态上下文长度上限",
+    "default": 1800,
+    "hint": "300～4000；优先保留当前认知，按完整条目裁减。"
+  },
+  "observation_retention_hours": {
+    "type": "int",
+    "description": "旁听原文保留小时数",
+    "default": 48,
+    "hint": "1～168。到期清理原文，保留必要的非正文来源标识防止重复学习。"
+  },
+  "interaction_retention_days": {
+    "type": "int",
+    "description": "互动原文保留天数",
+    "default": 7,
+    "hint": "1～30。已形成的记忆摘要单独管理，可在面板遗忘。"
+  },
+  "daily_token_limit": {
+    "type": "int",
+    "description": "全部群每日学习 token 预算",
+    "default": 60000,
+    "hint": "0 停止模型学习。按保守预留和已返回用量控制，不是供应商精确账单。"
+  },
+  "daily_group_token_limit": {
+    "type": "int",
+    "description": "每群每日学习 token 预算",
+    "default": 20000,
+    "hint": "与全部群预算同时生效，0 停止模型学习。"
+  },
+  "max_output_tokens": {
+    "type": "int",
+    "description": "单次学习输出 token 上限",
+    "default": 1200,
+    "hint": "256～4096；实际执行受模型提供商支持影响。"
+  },
+  "price_aware_learning": {
+    "type": "bool",
+    "description": "按价格时段积累和学习",
+    "default": true,
+    "hint": "常规价攒够也更新；低价时降低门槛、缩短间隔。关闭后使用原固定学习节奏。"
+  },
+  "cheap_learning_windows": {
+    "type": "list",
+    "description": "低价时段（北京时间）",
+    "default": [],
+    "hint": "每行 HH:MM-HH:MM，可跨午夜，例如 23:00-07:00。请按实际供应商定价填写；空列表全部按常规价。"
+  },
+  "learning_windows": {
+    "type": "list",
+    "description": "允许后台学习的时间窗",
+    "default": [],
+    "hint": "每行 HH:MM-HH:MM；空列表全天允许。低价时段和最长等待都不会越过此限制。"
+  },
+  "regular_interaction_batch": {
+    "type": "int",
+    "description": "常规价互动批量门槛",
+    "default": 3,
+    "hint": "同群同 QQ 累计条数，1～60。明确简单偏好仍即时本地记录，无模型调用。"
+  },
+  "cheap_interaction_batch": {
+    "type": "int",
+    "description": "低价互动批量门槛",
+    "default": 1,
+    "hint": "同群同 QQ 累计条数，1～60。"
+  },
+  "cheap_observation_batch": {
+    "type": "int",
+    "description": "低价旁听批量门槛",
+    "default": 5,
+    "hint": "2～60。采用表达仍须通过多用户、多日期证据门槛。"
+  },
+  "cheap_learning_interval_seconds": {
+    "type": "int",
+    "description": "低价学习间隔（秒）",
+    "default": 300,
+    "hint": "60～86400；同类批次分别冷却，低价时仍受每日预算限制。"
+  },
+  "max_learning_wait_seconds": {
+    "type": "int",
+    "description": "小批内容最长积累时间（秒）",
+    "default": 21600,
+    "hint": "600～86400；超过后可处理不足批量门槛的内容，仍遵守冷却、时间窗、权限和预算。"
+  },
+  "evolution_guidance": {
+    "type": "text",
+    "description": "进化方向提示词",
+    "default": "",
+    "hint": "最多4000字。由你指定学习关注点、表达目标及需要减少的习惯；只指导有证据的学习，不自动改核心人设、不增加工具权限。"
+  }
 }

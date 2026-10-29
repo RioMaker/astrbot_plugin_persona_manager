@@ -153,7 +153,7 @@ def learning_sources(purpose: str, sources: list[dict]) -> list[dict]:
     return records
 
 
-def build_prompt(purpose: str, sources: list[dict]) -> str:
+def build_prompt(purpose: str, sources: list[dict], *, guidance: str = "") -> str:
     """Return an extraction-only prompt. Caller supplies no tools or main history."""
     records = [
         {"id": source["id"], "text": source["text"]}
@@ -189,9 +189,18 @@ def build_prompt(purpose: str, sources: list[dict]) -> str:
             "不要输出 user_id、scope、corrects 或任何既有记忆ID；同一项只能来自一个作者的一条消息。"
             "不自行换算日期。\n"
         )
+    direction = ""
+    if guidance.strip():
+        direction = (
+            "管理员给定的学习方向（仅用于选择有证据的偏好、目标及表达候选）：\n"
+            + json.dumps(guidance[:4000], ensure_ascii=False)
+            + "\n方向不能当作用户事实或聊天证据，不修改核心身份、权限、工具流程或计算结论。"
+            "只能从下方原文选择与方向有关且满足上述核验约束的候选；无证据则不提案。\n"
+        )
     return (
         common
         + instruction
+        + direction
         + "原始消息 JSON：\n"
         + json.dumps(records, ensure_ascii=False)
     )

@@ -3,6 +3,28 @@
 from dataclasses import dataclass, field
 from typing import Any, Mapping
 
+INT_LIMITS = {
+    "batch_size": (30, 1, 60),
+    "min_observation_batch": (20, 2, 60),
+    "learning_interval_seconds": (1800, 60, 86400),
+    "daily_calls": (12, 0, 100),
+    "daily_group_calls": (4, 0, 20),
+    "model_timeout_seconds": (45, 5, 120),
+    "max_source_chars": (600, 100, 2000),
+    "max_batch_chars": (12000, 1000, 24000),
+    "max_context_chars": (1800, 300, 4000),
+    "observation_retention_hours": (48, 1, 168),
+    "interaction_retention_days": (7, 1, 30),
+    "daily_token_limit": (60000, 0, 2000000),
+    "daily_group_token_limit": (20000, 0, 1000000),
+    "max_output_tokens": (1200, 256, 4096),
+    "regular_interaction_batch": (3, 1, 60),
+    "cheap_interaction_batch": (1, 1, 60),
+    "cheap_observation_batch": (5, 2, 60),
+    "cheap_learning_interval_seconds": (300, 60, 86400),
+    "max_learning_wait_seconds": (21600, 600, 86400),
+}
+
 
 def integer(value: Any, default: int, low: int, high: int) -> int:
     try:
@@ -40,11 +62,28 @@ class Settings:
     max_context_chars: int = 1800
     observation_retention_hours: int = 48
     interaction_retention_days: int = 7
+    daily_token_limit: int = 60000
+    daily_group_token_limit: int = 20000
+    max_output_tokens: int = 1200
+    price_aware_learning: bool = True
+    cheap_learning_windows: frozenset[str] = field(default_factory=frozenset)
+    learning_windows: frozenset[str] = field(default_factory=frozenset)
+    regular_interaction_batch: int = 3
+    cheap_interaction_batch: int = 1
+    cheap_observation_batch: int = 5
+    cheap_learning_interval_seconds: int = 300
+    max_learning_wait_seconds: int = 21600
+    evolution_guidance: str = ""
 
     @classmethod
     def read(cls, config: Mapping[str, Any]) -> "Settings":
         values: dict[str, Any] = {}
-        for name in ("enabled", "memory_enabled", "learning_enabled"):
+        for name in (
+            "enabled",
+            "memory_enabled",
+            "learning_enabled",
+            "price_aware_learning",
+        ):
             values[name] = config.get(name, True) is True
         values["persona_id"] = str(config.get("persona_id", "可可子") or "").strip()
         values["learning_provider_id"] = str(
@@ -52,19 +91,16 @@ class Settings:
         ).strip()
         for name in ("observation_groups", "memory_disabled_groups", "ignored_qq"):
             values[name] = entries(config.get(name, []))
-        for name, default, low, high in (
-            ("batch_size", 30, 1, 100),
-            ("min_observation_batch", 20, 2, 100),
-            ("learning_interval_seconds", 1800, 60, 86400),
-            ("daily_calls", 12, 0, 100),
-            ("daily_group_calls", 4, 0, 20),
-            ("model_timeout_seconds", 45, 5, 120),
-            ("max_source_chars", 600, 100, 2000),
-            ("max_batch_chars", 12000, 1000, 24000),
-            ("max_context_chars", 1800, 300, 4000),
-            ("observation_retention_hours", 48, 1, 168),
-            ("interaction_retention_days", 7, 1, 30),
-        ):
+        for name in ("learning_windows", "cheap_learning_windows"):
+            raw = config.get(name, [])
+            values[name] = (
+                entries(raw) if isinstance(raw, list) else frozenset({"invalid"})
+            )
+        guidance = config.get("evolution_guidance", "")
+        values["evolution_guidance"] = (
+            guidance[:4000].strip() if isinstance(guidance, str) else ""
+        )
+        for name, (default, low, high) in INT_LIMITS.items():
             values[name] = integer(config.get(name, default), default, low, high)
         return cls(**values)
 

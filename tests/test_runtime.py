@@ -24,6 +24,7 @@ class FakeContext:
         self.started = asyncio.Event()
         self.release = asyncio.Event()
         self.cancelled = False
+        self.usage = None
 
     async def get_current_chat_provider_id(self, *, umo):
         self.provider_lookups.append(umo)
@@ -71,7 +72,8 @@ class FakeContext:
                 for row in records
             ]
         return SimpleNamespace(
-            completion_text=json.dumps({"proposals": proposals}, ensure_ascii=False)
+            completion_text=json.dumps({"proposals": proposals}, ensure_ascii=False),
+            usage=self.usage,
         )
 
 
@@ -81,6 +83,18 @@ class FakeLogger:
 
     def warning(self, message, *args, **kwargs):
         self.messages.append((message, args, kwargs))
+
+
+def test_idle_overview_still_reports_current_price_phase(harness):
+    harness.config[0] = replace(
+        harness.config[0],
+        price_aware_learning=True,
+        cheap_learning_windows=frozenset({"11:00-13:00"}),
+    )
+    asyncio.run(harness.runtime.run_once())
+    assert harness.runtime.scheduler_status["phase"] == "cheap"
+    assert harness.runtime.scheduler_status["state"] == "idle"
+    assert harness.context.calls == []
 
 
 @pytest.fixture
@@ -95,6 +109,7 @@ def harness(tmp_path, monkeypatch):
             persona_id="cocoa",
             observation_groups=frozenset({"g1", "g2"}),
             min_observation_batch=2,
+            price_aware_learning=False,
         )
     ]
     context = FakeContext()
@@ -629,3 +644,252 @@ def test_filtered_record_cannot_be_learned_from_mixed_model_batch(harness):
     assert "银行卡" not in harness.context.calls[0]["prompt"]
     assert harness.store.profile("cocoa", "123")[0]["content"] == "我喜欢喝热茶"
     assert harness.store.pending_sources() == []
+
+
+def test_regular_price_batches_messages_but_discount_can_process_small_batch(harness):
+    harness.config[0] = replace(harness.config[0], price_aware_learning=True)
+    harness.store.add_source(sample(harness, "one"))
+    asyncio.run(harness.runtime.run_once())
+    assert harness.context.calls == []
+    assert harness.runtime.scheduler_status["state"] == "collecting"
+    harness.config[0] = replace(
+        harness.config[0], cheap_learning_windows=frozenset({"11:00-13:00"})
+    )
+    asyncio.run(harness.runtime.run_once())
+    assert len(harness.context.calls) == 1
+    assert harness.runtime.scheduler_status["phase"] == "cheap"
+
+
+def test_regular_price_updates_when_personal_batch_threshold_is_met(harness):
+    harness.config[0] = replace(harness.config[0], price_aware_learning=True)
+    for index in range(3):
+        harness.store.add_source(sample(harness, f"message-{index}"))
+    asyncio.run(harness.runtime.run_once())
+    assert len(harness.context.calls) == 1
+    assert (
+        len(
+            json.loads(harness.context.calls[0]["prompt"].split("原始消息 JSON：\n")[1])
+        )
+        == 3
+    )
+    assert harness.runtime.scheduler_status["phase"] == "regular"
+
+
+def test_max_wait_allows_small_batch_but_never_bypasses_learning_windows(harness):
+    harness.config[0] = replace(
+        harness.config[0],
+        price_aware_learning=True,
+        max_learning_wait_seconds=600,
+        learning_windows=frozenset({"13:00-14:00"}),
+    )
+    harness.store.add_source(sample(harness, age=700))
+    asyncio.run(harness.runtime.run_once())
+    assert harness.context.calls == []
+    assert harness.runtime.scheduler_status["state"] == "outside_window"
+    harness.clock.now += 3600
+    asyncio.run(harness.runtime.run_once())
+    assert len(harness.context.calls) == 1
+
+
+def test_max_wait_does_not_bypass_failure_cooldown(harness):
+    harness.config[0] = replace(
+        harness.config[0], price_aware_learning=True, max_learning_wait_seconds=600
+    )
+    harness.store.add_source(sample(harness, age=700))
+    harness.context.error = RuntimeError("temporary failure")
+    asyncio.run(harness.runtime.run_once())
+    asyncio.run(harness.runtime.run_once())
+    assert len(harness.context.calls) == 1
+    assert harness.runtime.scheduler_status["state"] == "cooldown"
+
+
+def test_discount_window_end_during_provider_lookup_rechecks_batch_size(harness):
+    harness.config[0] = replace(
+        harness.config[0],
+        price_aware_learning=True,
+        cheap_learning_windows=frozenset({"11:00-12:01"}),
+    )
+    harness.store.add_source(sample(harness))
+
+    async def lookup(**kwargs):
+        harness.clock.now += 61
+        return "session-provider"
+
+    harness.context.get_current_chat_provider_id = lookup
+    asyncio.run(harness.runtime.run_once())
+    assert harness.context.calls == []
+    assert harness.runtime.scheduler_status["state"] == "deferred"
+    assert harness.store.budget_used("2026-10-29", "*") == 0
+
+
+def test_direction_is_present_only_in_learning_prompt_and_usage_is_settled(harness):
+    direction = "优先保留练习目标，表达更简洁。"
+    harness.config[0] = replace(
+        harness.config[0], evolution_guidance=direction, max_output_tokens=256
+    )
+    harness.context.usage = SimpleNamespace(input_other=80, input_cached=20, output=15)
+    harness.store.add_source(sample(harness))
+    asyncio.run(harness.runtime.run_once())
+    call = harness.context.calls[0]
+    assert direction in call["prompt"]
+    assert call["max_tokens"] == 256
+    assert call["tools"] is None and call["contexts"] == []
+    report = harness.store.usage_report("2026-10-29")
+    assert report["today"]["reported_tokens"] == 115
+    assert report["today"]["reported_input_tokens"] == 100
+    assert report["today"]["reported_output_tokens"] == 15
+    assert report["recent"][0]["accepted"] == 1
+    assert report["recent"][0]["metadata"]["guidance_hash"]
+    assert direction not in json.dumps(report, ensure_ascii=False)
+    context, _ = asyncio.run(harness.runtime.chat_context(sample(harness)))
+    assert direction not in context
+
+
+def test_direction_change_during_call_discards_result_but_keeps_real_usage(harness):
+    harness.store.add_source(sample(harness))
+    harness.context.block = True
+    harness.context.usage = SimpleNamespace(input_other=40, input_cached=0, output=5)
+
+    async def scenario():
+        task = asyncio.create_task(harness.runtime.run_once())
+        await asyncio.wait_for(harness.context.started.wait(), 2)
+        harness.config[0] = replace(
+            harness.config[0], evolution_guidance="使用新的方向"
+        )
+        harness.context.release.set()
+        await task
+
+    asyncio.run(scenario())
+    assert harness.store.profile("cocoa", "123") == []
+    report = harness.store.usage_report("2026-10-29")
+    assert report["today"]["reported_tokens"] == 45
+    assert report["recent"][0]["status"] == "discarded"
+
+
+@pytest.mark.parametrize("field", ["daily_token_limit", "daily_group_token_limit"])
+def test_insufficient_token_budget_does_not_start_call_or_consume_call_count(
+    harness, field
+):
+    harness.config[0] = replace(harness.config[0], **{field: 1})
+    harness.store.add_source(sample(harness))
+    asyncio.run(harness.runtime.run_once())
+    assert harness.context.calls == []
+    assert harness.store.budget_used("2026-10-29", "*") == 0
+    assert harness.runtime.scheduler_status["state"] == "budget_exhausted"
+
+
+def test_cancelled_learning_retains_unknown_usage_reservation(harness):
+    harness.store.add_source(sample(harness))
+    harness.context.block = True
+
+    async def scenario():
+        task = asyncio.create_task(harness.runtime.run_once())
+        await asyncio.wait_for(harness.context.started.wait(), 2)
+        task.cancel()
+        with pytest.raises(asyncio.CancelledError):
+            await task
+
+    asyncio.run(scenario())
+    report = harness.store.usage_report("2026-10-29")
+    assert report["recent"][0]["status"] == "cancelled"
+    assert report["today"]["reported_tokens"] == 0
+    assert report["today"]["missing_usage_calls"] == 1
+    assert report["today"]["estimated_tokens"] > 0
+
+
+def test_guidance_text_cannot_be_used_as_personal_memory_evidence(harness):
+    direction = "我喜欢喝咖啡"
+    harness.config[0] = replace(harness.config[0], evolution_guidance=direction)
+    harness.store.add_source(sample(harness))
+
+    async def fabricate(**kwargs):
+        return SimpleNamespace(
+            completion_text=json.dumps(
+                {
+                    "proposals": [
+                        {
+                            "source_id": "m1",
+                            "evidence": direction,
+                            "kind": "preference",
+                            "key": "drink",
+                            "content": direction,
+                            "state": "asserted",
+                        }
+                    ]
+                },
+                ensure_ascii=False,
+            )
+        )
+
+    harness.context.llm_generate = fabricate
+    asyncio.run(harness.runtime.run_once())
+    assert harness.store.profile("cocoa", "123") == []
+    assert harness.store.usage_report("2026-10-29")["recent"][0]["accepted"] == 0
+
+
+def test_revocation_after_reservation_releases_unsent_call_and_tokens(harness):
+    harness.store.add_source(sample(harness))
+    original_db = harness.runtime.db
+
+    async def revoke_after_reserve(method, *args, **kwargs):
+        result = await original_db(method, *args, **kwargs)
+        if method == "reserve_learning":
+            harness.config[0] = replace(harness.config[0], enabled=False)
+        return result
+
+    harness.runtime.db = revoke_after_reserve
+    asyncio.run(harness.runtime.run_once())
+    assert harness.context.calls == []
+    report = harness.store.usage_report("2026-10-29")
+    assert report["global_call_budget_used"] == 0
+    assert report["global_token_budget_used"] == 0
+    assert report["recent"][0]["status"] == "released"
+
+
+def test_discount_retries_use_discount_interval_without_bypassing_it(harness):
+    harness.config[0] = replace(
+        harness.config[0],
+        price_aware_learning=True,
+        cheap_learning_windows=frozenset({"11:00-13:00"}),
+    )
+    harness.store.add_source(sample(harness))
+    harness.context.error = RuntimeError("temporary")
+    asyncio.run(harness.runtime.run_once())
+    harness.clock.now += 299
+    asyncio.run(harness.runtime.run_once())
+    assert len(harness.context.calls) == 1
+    harness.clock.now += 1
+    asyncio.run(harness.runtime.run_once())
+    assert len(harness.context.calls) == 2
+
+
+@pytest.mark.parametrize("change", ["disabled", "price_phase", "day"])
+def test_last_preflight_change_releases_started_reservation_without_provider_call(
+    harness, change
+):
+    harness.config[0] = replace(
+        harness.config[0],
+        price_aware_learning=True,
+        cheap_learning_windows=frozenset({"11:00-12:01"}),
+    )
+    harness.store.add_source(sample(harness))
+    original_db = harness.runtime.db
+
+    async def change_after_begin(method, *args, **kwargs):
+        result = await original_db(method, *args, **kwargs)
+        if method == "begin_learning":
+            if change == "disabled":
+                harness.config[0] = replace(harness.config[0], enabled=False)
+            elif change == "price_phase":
+                harness.clock.now += 61
+            else:
+                harness.clock.now += 86400
+        return result
+
+    harness.runtime.db = change_after_begin
+    asyncio.run(harness.runtime.run_once())
+    assert harness.context.calls == []
+    report = harness.store.usage_report("2026-10-29")
+    assert report["global_call_budget_used"] == 0
+    assert report["global_token_budget_used"] == 0
+    assert report["recent"][0]["status"] == "released"

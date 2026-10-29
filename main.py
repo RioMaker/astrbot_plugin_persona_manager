@@ -1,8 +1,11 @@
 """Observe after Access Gate; enrich only its actual group chat requests."""
 
+import asyncio
+import copy
 import inspect
 import json
 import re
+from datetime import datetime
 from pathlib import Path
 
 from astrbot.api import AstrBotConfig, logger
@@ -16,10 +19,12 @@ from astrbot.core.star.session_llm_manager import SessionServiceManager
 from astrbot.core.star.session_plugin_manager import SessionPluginManager
 from astrbot.core.utils.astrbot_path import get_astrbot_data_path
 
+from .configuration import page_config, revision, usage_for_page, validate_changes
 from .ingress import group_identity, sample
 from .runtime import CONTEXT_MARKER, Runtime
 from .settings import Settings
 from .storage import Store
+from .temporal import BEIJING
 
 PLUGIN_NAME = "astrbot_plugin_persona_manager"
 GATE_NAME = "astrbot_plugin_access_gate"
@@ -295,6 +300,80 @@ class PersonaManagerPlugin(Star):
             await self.runtime.db("set_core", persona_id, content)
         return content
 
+    async def _page_choices(self):
+        choices = {"personas": [], "providers": []}
+        try:
+            personas = await self.context.persona_manager.get_all_personas()
+            for persona in personas:
+                identity = getattr(persona, "persona_id", None)
+                if identity:
+                    choices["personas"].append(
+                        {"id": str(identity), "label": str(identity)}
+                    )
+        except Exception:
+            pass  # Typed IDs remain usable if a selector API is unavailable.
+        try:
+            for provider in self.context.get_all_providers():
+                config = provider.provider_config
+                identity = config.get("id")
+                if identity:
+                    choices["providers"].append(
+                        {"id": str(identity), "label": str(identity)}
+                    )
+        except Exception:
+            pass
+        return choices
+
+    async def _save_page_config(self, payload):
+        if payload.get("revision") != revision(self.config):
+            return error_response(
+                "配置已被其他页面修改，请重新载入并核对草稿", status_code=409
+            )
+        updated = validate_changes(self.config, payload.get("values"))
+        changed = payload["values"]
+        if "persona_id" in changed:
+            persona = await self.context.persona_manager.get_persona(
+                updated["persona_id"]
+            )
+            if persona is None:
+                raise ValueError("目标原生人格不存在，请先在 AstrBot 创建")
+        if "learning_provider_id" in changed and updated["learning_provider_id"]:
+            providers = (await self._page_choices())["providers"]
+            if updated["learning_provider_id"] not in {row["id"] for row in providers}:
+                raise ValueError("学习模型不存在或未启用，请选择已启用的对话模型")
+        # Persona/provider lookups may yield to a second Dashboard editor.
+        if payload.get("revision") != revision(self.config):
+            return error_response("配置已变化，请重新载入并核对草稿", status_code=409)
+        old = copy.deepcopy(dict(self.config))
+        async_save = getattr(self.config, "save_config_async", None)
+        sync_save = getattr(self.config, "save_config", None)
+        if not callable(async_save) and not callable(sync_save):
+            raise ValueError("当前 AstrBot 配置保存接口不可用")
+        # Invalidate in-flight extraction even if the direction later changes back.
+        await self.runtime.db("invalidate")
+        if payload.get("revision") != revision(self.config):
+            return error_response("配置已变化，请重新载入并核对草稿", status_code=409)
+        try:
+            if callable(async_save):
+                saved = await async_save(updated)
+                if saved is False:
+                    return error_response(
+                        "保存被较新的配置覆盖，请刷新核对", status_code=409
+                    )
+            else:
+                await asyncio.to_thread(sync_save, updated)
+        except Exception:
+            # AstrBot merges the mapping before disk IO. Restore failed writes in memory.
+            for key, value in updated.items():
+                if self.config.get(key) == value:
+                    if key in old:
+                        self.config[key] = old[key]
+                    else:
+                        self.config.pop(key, None)
+            raise
+        self._debug.clear()
+        return json_response({"saved": True, "revision": revision(self.config)})
+
     async def page_state(self):
         if not request.username:
             return error_response("需要登录 AstrBot 管理面板", status_code=403)
@@ -322,8 +401,14 @@ class PersonaManagerPlugin(Star):
                     row = await self.runtime.db("get_style", style_id)
                     labels.append(row["expression"] if row else "已遗忘的表达")
                 version["content"] = "、".join(labels) or "未启用学习表达"
+            day = datetime.now(BEIJING).date().isoformat()
+            usage = await self.runtime.db("usage_report", day, days=7)
             return json_response(
                 {
+                    "config": page_config(self.config),
+                    "choices": await self._page_choices(),
+                    "usage": usage_for_page(usage, self.settings()),
+                    "schedule": self.runtime.scheduler_status,
                     "status": {
                         **await self.runtime.db("stats"),
                         "paused": await self.runtime.paused(),
@@ -386,6 +471,9 @@ class PersonaManagerPlugin(Star):
         if not isinstance(payload, dict):
             return error_response("请求必须是对象", status_code=400)
         try:
+            if payload.get("action") == "config_save":
+                async with self.runtime.lock:
+                    return await self._save_page_config(payload)
             persona_id = self._page_persona(payload.get("persona_id"))
             action = payload.get("action")
             async with self.runtime.lock:

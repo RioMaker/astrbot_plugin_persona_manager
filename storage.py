@@ -5,14 +5,16 @@ from __future__ import annotations
 import hashlib
 import json
 import math
+import re
 import sqlite3
 import threading
 import time
-from datetime import datetime
+from datetime import date, datetime, timedelta
 from pathlib import Path
 from typing import Callable
 
 from .temporal import BEIJING, is_past_reference, resolve_time
+from .usage import token_count, usage_values
 
 
 def _json(value) -> str:
@@ -75,6 +77,16 @@ class Store:
             CREATE TABLE IF NOT EXISTS settings (key TEXT PRIMARY KEY,value TEXT NOT NULL);
             CREATE TABLE IF NOT EXISTS style_activations (
                 id INTEGER PRIMARY KEY,scope_key TEXT NOT NULL,style_id INTEGER NOT NULL,day TEXT NOT NULL);
+            CREATE TABLE IF NOT EXISTS learning_usage (
+                id INTEGER PRIMARY KEY,day TEXT NOT NULL,scope_key TEXT NOT NULL,
+                persona_id TEXT NOT NULL,provider_id TEXT NOT NULL,purpose TEXT NOT NULL,
+                status TEXT NOT NULL DEFAULT 'reserved',estimated_input INTEGER NOT NULL,
+                output_limit INTEGER NOT NULL,charged_tokens INTEGER NOT NULL,
+                input_tokens INTEGER,output_tokens INTEGER,total_tokens INTEGER,
+                created_at REAL NOT NULL,started_at REAL,finished_at REAL,
+                accepted INTEGER NOT NULL DEFAULT 0,error_type TEXT NOT NULL DEFAULT '',
+                metadata TEXT NOT NULL DEFAULT '{}');
+            CREATE INDEX IF NOT EXISTS learning_usage_day ON learning_usage(day,scope_key,status);
         """)
         if "extra" not in {x[1] for x in self.db.execute("PRAGMA table_info(sources)")}:
             self.db.execute(
@@ -104,6 +116,12 @@ class Store:
 
     def _bump_epoch(self) -> None:
         self.db.execute("UPDATE meta SET value=value+1 WHERE key='epoch'")
+
+    def invalidate(self) -> int:
+        """Invalidate pending learning snapshots after a trusted config change."""
+        with self._lock, self.db:
+            self._bump_epoch()
+            return self.epoch()
 
     def add_source(self, source: dict) -> bool:
         fields = (
@@ -859,6 +877,345 @@ class Store:
                 "SELECT used FROM budgets WHERE day=? AND scope_key=?", (day, scope_key)
             ).fetchone()
             return row[0] if row else 0
+
+    @staticmethod
+    def _usage_metadata(value) -> str:
+        """Persist counters and reason codes only, never prompts or response text."""
+        value = value if isinstance(value, dict) else {}
+        result = {}
+        for name in ("sample_count", "accepted_memories", "accepted_styles"):
+            if token_count(value.get(name)) is not None:
+                result[name] = value[name]
+        for name in ("phase", "schedule_reason"):
+            item = value.get(name)
+            if isinstance(item, str) and re.fullmatch(r"[a-zA-Z0-9_.:-]{1,80}", item):
+                result[name] = item
+        digest = value.get("guidance_hash")
+        if isinstance(digest, str) and re.fullmatch(r"[0-9a-f]{8,64}", digest):
+            result["guidance_hash"] = digest
+        return _json(result)
+
+    def token_budget_used(self, day: str, scope_key: str = "*") -> int:
+        with self._lock:
+            where, args = "day=?", [day]
+            if scope_key != "*":
+                where += " AND scope_key=?"
+                args.append(scope_key)
+            return self.db.execute(
+                f"SELECT COALESCE(sum(charged_tokens),0) FROM learning_usage WHERE {where}",
+                args,
+            ).fetchone()[0]
+
+    def reserve_learning(
+        self,
+        day: str,
+        scope_key: str,
+        *,
+        persona_id: str,
+        provider_id: str,
+        purpose: str,
+        estimated_input: int,
+        output_limit: int,
+        global_calls: int,
+        group_calls: int,
+        global_tokens: int,
+        group_tokens: int,
+        metadata=None,
+    ) -> int | None:
+        """Atomically reserve calls and conservative tokens in persistent storage.
+
+        Existing call counters are reused, including pre-ledger calls. A zero
+        limit disables calls; unknown earlier token usage is exposed in reports,
+        never invented or used to reset already consumed call quotas.
+        """
+        if (
+            not scope_key
+            or scope_key == "*"
+            or not persona_id
+            or not provider_id
+            or purpose not in {"interaction", "observation"}
+            or any(
+                token_count(v) is None
+                for v in (
+                    estimated_input,
+                    output_limit,
+                    global_calls,
+                    group_calls,
+                    global_tokens,
+                    group_tokens,
+                )
+            )
+        ):
+            raise ValueError("Invalid learning reservation")
+        date.fromisoformat(day)
+        reserved = estimated_input + output_limit
+        if reserved <= 0:
+            return None
+        with self._lock, self.db:
+            self.db.execute("BEGIN IMMEDIATE")
+            for key, call_limit, token_limit in (
+                ("*", global_calls, global_tokens),
+                (scope_key, group_calls, group_tokens),
+            ):
+                if (
+                    self.budget_used(day, key) >= call_limit
+                    or self.token_budget_used(day, key) + reserved > token_limit
+                ):
+                    return None
+            self.db.executemany(
+                "INSERT INTO budgets(day,scope_key,used) VALUES (?,?,1) "
+                "ON CONFLICT(day,scope_key) DO UPDATE SET used=used+1",
+                ((day, key) for key in ("*", scope_key)),
+            )
+            cursor = self.db.execute(
+                "INSERT INTO learning_usage(day,scope_key,persona_id,provider_id,purpose,"
+                "estimated_input,output_limit,charged_tokens,created_at,metadata) VALUES (?,?,?,?,?,?,?,?,?,?)",
+                (
+                    day,
+                    scope_key,
+                    str(persona_id)[:200],
+                    str(provider_id)[:200],
+                    purpose,
+                    estimated_input,
+                    output_limit,
+                    reserved,
+                    self.clock(),
+                    self._usage_metadata(metadata),
+                ),
+            )
+            return cursor.lastrowid
+
+    def begin_learning(self, reservation_id: int) -> bool:
+        """Mark a reserved call as potentially sent before invoking its provider."""
+        with self._lock, self.db:
+            cursor = self.db.execute(
+                "UPDATE learning_usage SET status='running',started_at=? WHERE id=? AND status='reserved'",
+                (self.clock(), reservation_id),
+            )
+            return cursor.rowcount == 1
+
+    def release_learning(self, reservation_id: int, *, not_sent=False) -> bool:
+        """Release known unsent work, never infer zero cost from timeout/cancel.
+
+        Only the trusted caller may assert ``not_sent=True`` after begin_learning
+        when its final guard failed before invoking the provider coroutine.
+        """
+        with self._lock, self.db:
+            self.db.execute("BEGIN IMMEDIATE")
+            row = self.db.execute(
+                "SELECT day,scope_key FROM learning_usage WHERE id=? AND "
+                "(status='reserved' OR (status='running' AND ?=1))",
+                (reservation_id, int(not_sent is True)),
+            ).fetchone()
+            if row is None:
+                return False
+            self.db.execute(
+                "UPDATE learning_usage SET status='released',charged_tokens=0,finished_at=? WHERE id=?",
+                (self.clock(), reservation_id),
+            )
+            self.db.executemany(
+                "UPDATE budgets SET used=max(0,used-1) WHERE day=? AND scope_key=?",
+                ((row["day"], key) for key in ("*", row["scope_key"])),
+            )
+            return True
+
+    def settle_learning(
+        self,
+        reservation_id: int,
+        status: str,
+        usage=None,
+        *,
+        accepted=0,
+        error_type="",
+        metadata=None,
+    ) -> bool:
+        """Settle once. Missing usage and failed calls keep conservative charges."""
+        if status not in {"success", "error", "cancelled", "discarded"}:
+            raise ValueError("Invalid learning result status")
+        usage = usage if isinstance(usage, dict) else {}
+        measured = usage_values(
+            *(
+                usage.get(key)
+                for key in ("input_tokens", "output_tokens", "total_tokens")
+            )
+        )
+        accepted = token_count(accepted) or 0
+        error_type = (
+            error_type
+            if isinstance(error_type, str)
+            and re.fullmatch(r"[A-Za-z_][A-Za-z0-9_.]{0,99}", error_type)
+            else ""
+        )
+        with self._lock, self.db:
+            self.db.execute("BEGIN IMMEDIATE")
+            row = self.db.execute(
+                "SELECT * FROM learning_usage WHERE id=?", (reservation_id,)
+            ).fetchone()
+            if row is None or row["status"] not in {"reserved", "running"}:
+                return False
+            # Never infer that a reserved-but-interrupted call cost zero.
+            charge = row["charged_tokens"]
+            if measured["reported"]:
+                charge = measured["total_tokens"]
+            elif (
+                measured["input_tokens"] is not None
+                or measured["output_tokens"] is not None
+            ):
+                charge = max(
+                    charge,
+                    (measured["input_tokens"] or 0) + (measured["output_tokens"] or 0),
+                )
+            combined_meta = {
+                **json.loads(row["metadata"]),
+                **json.loads(self._usage_metadata(metadata)),
+            }
+            self.db.execute(
+                "UPDATE learning_usage SET status=?,charged_tokens=?,input_tokens=?,output_tokens=?,"
+                "total_tokens=?,finished_at=?,accepted=?,error_type=?,metadata=? WHERE id=?",
+                (
+                    status,
+                    charge,
+                    measured["input_tokens"],
+                    measured["output_tokens"],
+                    measured["total_tokens"],
+                    self.clock(),
+                    accepted,
+                    error_type,
+                    _json(combined_meta),
+                    reservation_id,
+                ),
+            )
+            return True
+
+    @staticmethod
+    def _usage_summary(rows) -> dict:
+        active = [row for row in rows if row["status"] != "released"]
+        pending = [row for row in active if row["status"] in {"reserved", "running"}]
+        settled = [
+            row for row in active if row["status"] not in {"reserved", "running"}
+        ]
+        return {
+            "calls": len(active),
+            "ledger_calls": len(active),
+            "started_calls": sum(row["started_at"] is not None for row in active),
+            "released_calls": len(rows) - len(active),
+            "reported_input_tokens": sum(row["input_tokens"] or 0 for row in active),
+            "reported_output_tokens": sum(row["output_tokens"] or 0 for row in active),
+            "reported_tokens": sum(row["total_tokens"] or 0 for row in active),
+            "reported_calls": sum(row["total_tokens"] is not None for row in active),
+            "estimated_tokens": sum(
+                row["charged_tokens"] for row in settled if row["total_tokens"] is None
+            ),
+            "reserved_tokens": sum(row["charged_tokens"] for row in pending),
+            "budget_tokens": sum(row["charged_tokens"] for row in active),
+            "failed_calls": sum(
+                row["status"] in {"error", "cancelled"} for row in active
+            ),
+            "discarded_calls": sum(row["status"] == "discarded" for row in active),
+            "missing_usage_calls": sum(row["total_tokens"] is None for row in settled),
+            "unknown_calls": sum(row["total_tokens"] is None for row in active),
+            "pending_calls": len(pending),
+            "accepted": sum(row["accepted"] for row in settled),
+            "legacy_calls": 0,
+        }
+
+    def usage_report(self, day: str, days=7, scope_key=None, persona_id=None) -> dict:
+        """Reported usage, unknown reservations and legacy calls stay separate."""
+        end = date.fromisoformat(day)
+        days = max(1, min(90, int(days)))
+        start = end - timedelta(days=days - 1)
+        where, args = "day>=? AND day<=?", [start.isoformat(), day]
+        for field, value in (("scope_key", scope_key), ("persona_id", persona_id)):
+            if value:
+                where += f" AND {field}=?"
+                args.append(value)
+        with self._lock:
+            rows = [
+                dict(row)
+                for row in self.db.execute(
+                    f"SELECT * FROM learning_usage WHERE {where} ORDER BY id DESC", args
+                )
+            ]
+            by_day = []
+            budget_scope = scope_key or "*"
+            for index in range(days):
+                date_key = (start + timedelta(days=index)).isoformat()
+                summary = self._usage_summary(
+                    [row for row in rows if row["day"] == date_key]
+                )
+                # Legacy usage cannot be assigned to a persona. Expose it only in
+                # the whole-plugin or exact group report, while global caps stay visible.
+                budget_calls = self.budget_used(date_key, budget_scope)
+                if not persona_id:
+                    summary["legacy_calls"] = max(0, budget_calls - summary["calls"])
+                    summary["calls"] += summary["legacy_calls"]
+                    summary["unknown_calls"] += summary["legacy_calls"]
+                summary["call_budget_used"] = budget_calls
+                by_day.append({"day": date_key, **summary})
+            totals = self._usage_summary(rows)
+            totals["legacy_calls"] = sum(item["legacy_calls"] for item in by_day)
+            totals["calls"] += totals["legacy_calls"]
+            totals["unknown_calls"] += totals["legacy_calls"]
+            totals["call_budget_used"] = sum(
+                item["call_budget_used"] for item in by_day
+            )
+            by_group = []
+            today_rows = [row for row in rows if row["day"] == day]
+            group_scopes = {row["scope_key"] for row in today_rows}
+            if not persona_id:
+                group_scopes.update(
+                    row[0]
+                    for row in self.db.execute(
+                        "SELECT DISTINCT scope_key FROM budgets WHERE day=? AND scope_key<>'*'",
+                        (day,),
+                    )
+                    if not scope_key or row[0] == scope_key
+                )
+            for scope in sorted(group_scopes):
+                group_rows = [row for row in today_rows if row["scope_key"] == scope]
+                summary = self._usage_summary(group_rows)
+                summary["call_budget_used"] = self.budget_used(day, scope)
+                if not persona_id:
+                    summary["legacy_calls"] = max(
+                        0, summary["call_budget_used"] - summary["calls"]
+                    )
+                    summary["calls"] += summary["legacy_calls"]
+                    summary["unknown_calls"] += summary["legacy_calls"]
+                by_group.append({"scope_key": scope, **summary})
+            recent = rows[:50]
+            for row in recent:
+                row["metadata"] = json.loads(row["metadata"])
+            return {
+                "day": day,
+                "days": days,
+                "today": by_day[-1],
+                "totals": totals,
+                "by_day": by_day,
+                "by_group": by_group,
+                "recent": recent,
+                "global_call_budget_used": self.budget_used(day, "*"),
+                "global_token_budget_used": self.token_budget_used(day),
+                "scope_call_budget_used": self.budget_used(day, budget_scope),
+                "scope_token_budget_used": self.token_budget_used(day, budget_scope),
+            }
+
+    def activity(self, scope_key: str, window_seconds=600, now=None) -> dict:
+        """Local backlog/activity only; this never expands authorized collection."""
+        now = self.clock() if now is None else float(now)
+        with self._lock:
+            row = self.db.execute(
+                "SELECT sum(CASE WHEN sent_at>=? THEN 1 ELSE 0 END) AS recent_count,"
+                "max(sent_at) AS last_sent_at,"
+                "sum(CASE WHEN status='pending' AND text<>'' THEN 1 ELSE 0 END) AS pending_count,"
+                "min(CASE WHEN status='pending' AND text<>'' THEN sent_at END) AS oldest_pending_at "
+                "FROM sources WHERE scope_key=? AND status<>'forgotten' AND sent_at<=?",
+                (now - max(0, float(window_seconds)), scope_key, now),
+            ).fetchone()
+            return {
+                **dict(row),
+                "recent_count": row["recent_count"] or 0,
+                "pending_count": row["pending_count"] or 0,
+            }
 
     def get_meta(self, key: str, default=None):
         with self._lock:

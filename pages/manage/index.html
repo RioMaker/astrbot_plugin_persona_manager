@@ -13,7 +13,7 @@
         <div class="heading-copy">
           <p class="eyebrow">PERSONA MANAGER</p>
           <h1>可可子的人格管理</h1>
-          <p class="lead">维护核心人设，查看有来源的记忆，管理各群的表达习惯。</p>
+          <p class="lead">把成长方向、学习节奏与相处记忆放在一起管理。</p>
         </div>
         <div class="header-actions">
           <span class="status-pill" id="learning-status">正在连接</span>
@@ -34,12 +34,45 @@
       </form>
 
       <nav class="tabs" aria-label="管理内容">
-        <button type="button" class="tab active" data-panel="core" aria-current="page">核心人设</button>
+        <button type="button" class="tab active" data-panel="overview" aria-current="page">学习总览</button>
+        <button type="button" class="tab" data-panel="settings">设置与方向 <span id="settings-tab-dot" hidden>●</span></button>
+        <button type="button" class="tab" data-panel="core">核心人设</button>
         <button type="button" class="tab" data-panel="memory">用户记忆</button>
         <button type="button" class="tab" data-panel="style">群表达</button>
       </nav>
 
-      <section id="panel-core" aria-labelledby="core-title">
+      <section id="panel-overview" aria-labelledby="overview-title">
+        <div class="section-heading"><div><h2 id="overview-title">今天的学习</h2><p class="muted">只统计本插件的后台学习；主聊天与其他插件的用量单独管理。</p></div><span id="usage-day" class="count">北京时间</span></div>
+        <div id="usage-metrics" class="metrics-grid"></div>
+        <div class="overview-grid">
+          <article class="card schedule-card">
+            <div class="item-header"><h3>学习节奏</h3><span id="schedule-status" class="tag">等待状态</span></div>
+            <p id="schedule-reason" class="schedule-reason">等待后台调度信息。</p>
+            <div id="schedule-details" class="item-meta"></div>
+            <div id="schedule-groups" class="schedule-groups"></div>
+            <div class="flow-strip" aria-label="学习流程"><span>积累样本</span><span>分时段总结</span><span>验证后采纳</span></div>
+            <p id="direction-preview" class="direction-preview">尚未设置进化方向，可在“设置与方向”中填写。</p>
+          </article>
+          <article class="card budget-card"><div class="item-header"><h3>今日预算</h3><span class="muted small">北京时间 00:00 换日</span></div><div id="budget-bars"></div><p class="muted small budget-note">预算占用包含已报告用量、估算和在途预留。缺少供应商用量时保守记账，不等同精确账单。</p></article>
+        </div>
+        <div class="overview-grid">
+          <article class="card"><div class="item-header"><h3>最近 7 天</h3><span class="muted small">学习 token 预算占用</span></div><div id="usage-chart" class="usage-chart"></div><p id="usage-chart-note" class="muted small"></p></article>
+          <article class="card"><div class="item-header"><h3>各群用量</h3><span class="muted small">当日后台学习</span></div><div id="usage-groups" class="table-wrap"></div></article>
+        </div>
+        <article class="card recent-card"><div class="item-header"><h3>最近学习记录</h3><span class="muted small">结果摘要与用量，不展示原始群聊正文</span></div><div id="learning-recent" class="learning-recent"></div></article>
+      </section>
+
+      <section id="panel-settings" aria-labelledby="settings-title" hidden>
+        <div class="section-heading"><div><h2 id="settings-title">设置与进化方向</h2><p class="muted">保存后用于后续学习。群触发仍交给现有白名单，私聊保持关闭。</p></div><span id="settings-count" class="count">载入配置中</span></div>
+        <div id="config-conflict" class="notice error" role="alert" hidden>后台配置已有变化。草稿已保留，请重载最新配置并核对后再编辑。</div>
+        <form id="settings-form">
+          <nav id="settings-nav" class="settings-nav" aria-label="配置分组"></nav>
+          <div id="settings-sections" class="settings-sections"></div>
+          <div class="settings-savebar card"><div><strong id="config-dirty">尚未载入配置</strong><p class="muted small">与 AstrBot 插件配置使用同一份设置。</p></div><div class="header-actions"><button id="config-reload" type="button" disabled>重载配置</button><button id="config-save" type="submit" class="primary" disabled>保存设置</button></div></div>
+        </form>
+      </section>
+
+      <section id="panel-core" aria-labelledby="core-title" hidden>
         <div class="section-heading">
           <div><h2 id="core-title">稳定的人格核心</h2><p class="muted">在这里编辑身份与行为边界，学习得到的群表达单独管理。</p></div>
           <span id="core-version-count" class="count">0 个版本</span>

@@ -8,6 +8,12 @@ let selectedPersona = "";
 let selectedUser = "";
 let selectedScope = "";
 let dialogRequest = null;
+let configBase = {};
+let configSchema = {};
+let configRevision = "";
+let configDirty = false;
+let configConflict = false;
+const configControls = new Map();
 
 const array = (value) => (Array.isArray(value) ? value : []);
 const object = (value) => (value && typeof value === "object" && !Array.isArray(value) ? value : {});
@@ -61,6 +67,8 @@ function setAvailability() {
   byId("core-versions").disabled ||= !array(state?.persona?.versions).length;
   byId("style-versions").disabled ||= !array(state?.style_versions).length;
   byId("scope-key").disabled ||= !array(state?.scopes).length;
+  byId("config-save").disabled ||= !configDirty || configConflict || !configRevision;
+  byId("config-reload").disabled ||= !state?.config;
   document.querySelectorAll("[data-unavailable]").forEach((control) => { control.disabled = true; });
 }
 
@@ -123,11 +131,334 @@ function renderState(replaceCore) {
   renderScopes();
   renderStyles();
   fillVersions("style", array(state.style_versions));
+  renderConfig();
+  renderOverview();
 }
 
 function renderCoreDirty() {
   const length = byId("core-content").value.length;
   byId("core-dirty").textContent = `${length.toLocaleString("zh-CN")} 字 · ${coreDirty ? "有未保存修改" : "已与当前版本同步"}`;
+}
+
+const sectionNames = { general: "基础与群范围", basic: "基础与群范围", scope: "基础与群范围", learning: "学习与采样", budget: "Token 预算", tokens: "Token 预算", schedule: "分时学习", evolution: "进化方向", direction: "进化方向", retention: "保留与高级", advanced: "保留与高级" };
+const optionNames = { immediate: "积累够样本即学习", adaptive: "自动判断", windows: "仅指定时段", hybrid: "组合策略" };
+
+function configValueText(value, schema) {
+  return schema.type === "list" ? array(value).join("\n") : string(value);
+}
+
+function updateConfigDirty() {
+  let count = 0;
+  for (const [name, control] of configControls) {
+    const changed = configSchema[name].type === "bool" ? control.checked !== configBase[name] : control.value !== configValueText(configBase[name], configSchema[name]);
+    if (changed) count += 1;
+    control.classList.toggle("changed", changed);
+  }
+  configDirty = count > 0;
+  byId("config-dirty").textContent = configConflict ? "后台配置已改变 · 草稿保留中" : count ? `${count} 项未保存修改` : configRevision ? "设置已同步" : "尚未载入配置";
+  byId("config-conflict").hidden = !configConflict;
+  byId("settings-tab-dot").hidden = !configDirty;
+  setAvailability();
+}
+
+function renderConfig({ replace = false } = {}) {
+  const incoming = object(state?.config);
+  if (!incoming.values || !incoming.schema || !incoming.revision) {
+    if (!configControls.size) byId("settings-sections").replaceChildren(node("p", "完整配置尚不可用，请确认后端插件已更新。", "empty"));
+    return;
+  }
+  if (configDirty && !replace) {
+    configConflict = incoming.revision !== configRevision;
+    updateConfigDirty();
+    return;
+  }
+  configBase = JSON.parse(JSON.stringify(incoming.values));
+  configSchema = object(incoming.schema);
+  configRevision = incoming.revision;
+  configConflict = false;
+  configDirty = false;
+  configControls.clear();
+  const target = byId("settings-sections");
+  target.replaceChildren();
+  const sections = new Map();
+  const sectionCards = new Map();
+  for (const [name, schemaValue] of Object.entries(configSchema)) {
+    const schema = object(schemaValue);
+    const sectionKey = schema.section || "advanced";
+    if (!sections.has(sectionKey)) {
+      const section = node("section", "", "card settings-section");
+      const title = node("h3", sectionNames[sectionKey] || sectionKey);
+      const fields = node("div", "", "settings-fields");
+      section.append(title, fields);
+      sections.set(sectionKey, fields);
+      sectionCards.set(sectionKey, section);
+      target.append(section);
+    }
+    const field = node("div", "", `field config-field${schema.type === "list" || name === "evolution_guidance" ? " wide-field" : ""}`);
+    const label = node("label", schema.description || name);
+    label.htmlFor = `setting-${name}`;
+    let control;
+    if (schema.type === "bool") {
+      control = node("input");
+      control.type = "checkbox";
+      control.checked = configBase[name] === true;
+      field.classList.add("check-field");
+    } else if (Array.isArray(schema.options) && schema.options.length) {
+      control = node("select");
+      schema.options.forEach((item) => {
+        const value = typeof item === "object" ? first(item.value, item.id) : item;
+        const option = node("option", typeof item === "object" ? first(item.label, item.description, value) : optionNames[item] || item);
+        option.value = string(value);
+        control.append(option);
+      });
+      control.value = configValueText(configBase[name], schema);
+    } else if (schema.type === "list" || name === "evolution_guidance" || schema.type === "text") {
+      control = node("textarea");
+      control.rows = name === "evolution_guidance" ? 9 : 3;
+      control.value = configValueText(configBase[name], schema);
+      if (schema.type === "list") control.placeholder = "每行一项；留空表示空列表";
+      if (name === "evolution_guidance") {
+        control.maxLength = 4000;
+        control.placeholder = "写下希望可可子逐渐形成的表达习惯、学习重点，以及应当避免的倾向……";
+      }
+    } else {
+      control = node("input");
+      control.type = schema.type === "int" ? "number" : "text";
+      control.value = configValueText(configBase[name], schema);
+      if (schema.type === "int") {
+        control.step = "1";
+        if (schema.minimum !== undefined) control.min = schema.minimum;
+        if (schema.maximum !== undefined) control.max = schema.maximum;
+      }
+      const choices = name === "persona_id" ? array(state.choices?.personas) : name === "learning_provider_id" ? array(state.choices?.providers) : [];
+      if (choices.length) {
+        const datalist = node("datalist");
+        datalist.id = `choices-${name}`;
+        choices.forEach((choice) => {
+          const option = node("option");
+          option.value = string(choice.id);
+          option.label = string(choice.label || choice.id);
+          datalist.append(option);
+        });
+        control.setAttribute("list", datalist.id);
+        field.append(datalist);
+      }
+    }
+    control.id = `setting-${name}`;
+    control.name = name;
+    control.autocomplete = "off";
+    control.addEventListener(schema.type === "bool" || control.tagName === "SELECT" ? "change" : "input", updateConfigDirty);
+    field.append(label, control);
+    if (schema.hint) field.append(node("p", schema.hint, "field-hint"));
+    if (name === "evolution_guidance") {
+      const example = mutationButton("载入参考方向", async () => {
+        if (control.value.trim() && !await ask({ title: "载入参考方向", description: "将替换编辑框里的内容，保存设置后才生效。", submit: "替换草稿" })) return;
+        control.value = "学习简短、自然、有分寸的群友表达，少复读和固定口癖。认真问题先解决问题，再适量调侃。优先保留群友明确的太鼓练习目标、进展和回答偏好；术数解读保持清楚、有依据。不要把玩笑、猜测或第三方说法当事实。";
+        updateConfigDirty();
+        notice("参考方向已载入草稿，保存设置后生效。", "info");
+      });
+      field.append(node("p", "方向引导学习取舍与表达，不自动改写固定人设，不增加工具能力。", "field-hint"), example);
+    }
+    configControls.set(name, control);
+    sections.get(sectionKey).append(field);
+  }
+  const order = ["基础与范围", "基础与群范围", "general", "basic", "scope", "进化方向", "evolution", "direction", "Token 预算", "budget", "tokens", "价格时段与积累", "schedule", "学习与模型", "learning", "保留与高级", "retention", "advanced"];
+  const keys = [...sectionCards.keys()].sort((a, b) => (order.indexOf(a) < 0 ? 99 : order.indexOf(a)) - (order.indexOf(b) < 0 ? 99 : order.indexOf(b)));
+  target.replaceChildren(...keys.map((key) => sectionCards.get(key)));
+  const nav = byId("settings-nav");
+  nav.replaceChildren();
+  keys.forEach((key, index) => {
+    const section = sectionCards.get(key);
+    section.id = `config-section-${index}`;
+    const link = node("a", sectionNames[key] || key);
+    link.href = `#${section.id}`;
+    nav.append(link);
+  });
+  byId("settings-count").textContent = `${configControls.size} 项设置`;
+  updateConfigDirty();
+}
+
+function changedConfigValues() {
+  const changes = {};
+  for (const [name, control] of configControls) {
+    const schema = configSchema[name];
+    let value;
+    if (schema.type === "bool") value = control.checked;
+    else if (schema.type === "int") {
+      if (!/^-?\d+$/.test(control.value.trim())) throw new Error(`${schema.description || name}：请填写整数。`);
+      value = Number(control.value);
+      if (!Number.isSafeInteger(value) || (schema.minimum !== undefined && value < schema.minimum) || (schema.maximum !== undefined && value > schema.maximum)) throw new Error(`${schema.description || name}：超出允许范围 ${schema.minimum ?? "不限"}～${schema.maximum ?? "不限"}。`);
+    } else if (schema.type === "list") value = [...new Set(control.value.split(/\r?\n/).map((item) => item.trim()).filter(Boolean))];
+    else value = control.value.trim();
+    if (name === "evolution_guidance" && value.length > 4000) throw new Error("进化方向最多 4000 字。");
+    if (JSON.stringify(value) !== JSON.stringify(configBase[name])) changes[name] = value;
+  }
+  return changes;
+}
+
+async function saveSettings() {
+  if (busy || !ready || configConflict || !configRevision) return;
+  let values;
+  try { values = changedConfigValues(); } catch (error) { notice(error.message, "error"); return; }
+  if (!Object.keys(values).length) { notice("设置没有变化。", "info"); return; }
+  const changesPersona = values.persona_id !== undefined && values.persona_id !== selectedPersona;
+  if (changesPersona && coreDirty && !await ask({ title: "更改目标人格", description: "保存成功后将载入新目标人格，当前未保存的核心人设草稿会被丢弃。", submit: "保存并切换" })) return;
+  await perform(async () => {
+    let result;
+    try { result = await bridge.apiPost("action", { action: "config_save", revision: configRevision, values }); }
+    catch (error) {
+      if (error?.status === 409 || /冲突|已变化|已更新|已改变|已被.*修改|被.*覆盖|conflict|revision/i.test(error?.message || "")) {
+        configConflict = true;
+        updateConfigDirty();
+      }
+      throw error;
+    }
+    if (result?.saved !== true) throw new Error("后台未确认配置保存成功，草稿已保留。");
+    configDirty = false;
+    configRevision = "";
+    if (changesPersona) { selectedPersona = ""; selectedUser = ""; selectedScope = ""; coreDirty = false; }
+    try { await loadState({ replaceCore: changesPersona }); }
+    catch (error) { configDirty = true; throw new Error(`配置已保存，但刷新失败；请重载核对结果，暂勿重复保存：${error?.message || "连接中断"}`); }
+  }, "设置已保存，后续学习将使用新配置。");
+}
+
+const counter = (value) => typeof value === "number" && Number.isFinite(value) && value >= 0 ? value : null;
+const countText = (value) => counter(value) === null ? "—" : value.toLocaleString("zh-CN");
+const jobNames = { success: "已完成", completed: "已完成", failed: "失败", error: "失败", cancelled: "已取消", discarded: "结果已作废", reserved: "已预留", running: "学习中", started: "学习中", pending: "待确认", released: "未调用", unknown: "用量待确认" };
+const scheduleNames = { idle: "等待样本", disabled: "已关闭", paused: "已暂停", learning: "学习中", running: "学习中", cooldown: "间隔等待", budget: "预算不足", budget_exhausted: "预算不足", outside_window: "允许时段外", waiting_samples: "积累样本", insufficient_samples: "积累样本", insufficient: "积累样本", cheap: "低价时段", regular: "常规时段", blocked: "权限受限", deferred: "暂缓学习", complete: "学习完成", completed: "学习完成", success: "学习完成", error: "检查失败", failed: "学习失败", cancelled: "已取消", discarded: "结果作废" };
+
+function renderOverview() {
+  const usage = object(state?.usage);
+  const totals = object(usage.summary);
+  byId("usage-day").textContent = usage.day ? `${usage.day} · 北京时间` : "北京时间";
+  const metrics = byId("usage-metrics");
+  metrics.replaceChildren();
+  for (const [label, value, note, style] of [
+    ["已报告 Token", totals.reported_tokens, `输入 ${countText(totals.input_tokens)} / 输出 ${countText(totals.output_tokens)}`, ""],
+    ["估算占用", totals.estimated_tokens, `${countText(totals.unknown_calls)} 次未获完整用量`, ""],
+    ["在途预留", totals.reserved_tokens, "等待完成或用量确认", ""],
+    ["学习调用", totals.calls, `失败 ${countText(totals.failed_calls)} 次`, "accent-metric"],
+  ]) {
+    const card = node("article", "", `card metric ${style}`);
+    card.append(node("span", label, "metric-label"), node("strong", countText(value), "metric-number"), node("span", note, "muted small"));
+    metrics.append(card);
+  }
+  const cfg = object(state?.config?.values);
+  const budget = byId("budget-bars");
+  budget.replaceChildren();
+  for (const [label, used, limit] of [["Token 预算", totals.charged_tokens, first(usage.limits?.daily_tokens, cfg.daily_token_limit)], ["调用预算", totals.calls, first(usage.limits?.daily_calls, cfg.daily_calls)]]) {
+    const line = node("div", "", "budget-line");
+    const head = node("div", "", "item-header");
+    head.append(node("span", label), node("strong", `${countText(used)} / ${countText(limit)}`));
+    const track = node("div", "", "budget-track");
+    const fill = node("div", "", "budget-fill");
+    const ratio = counter(used) !== null && counter(limit) !== null && limit > 0 ? Math.min(100, used / limit * 100) : 0;
+    fill.style.width = `${ratio}%`;
+    track.append(fill);
+    line.append(head, track);
+    if (limit === 0) line.append(node("span", "此预算为 0，后台学习不会发起调用。", "muted small"));
+    budget.append(line);
+  }
+  const schedule = object(state.schedule);
+  const code = string(first(schedule.status, schedule.state, "idle"));
+  byId("schedule-status").textContent = scheduleNames[code] || code;
+  byId("schedule-reason").textContent = string(first(schedule.reason, schedule.message, "后台尚未开始检查，或暂无可处理样本。"));
+  const details = byId("schedule-details");
+  details.replaceChildren();
+  const phase = first(schedule.phase, schedule.price_period, schedule.price_band);
+  addMeta(details, "当前价段", phase === "cheap" ? "低价" : phase ? "常规" : undefined);
+  addMeta(details, "待处理", first(schedule.pending_count, state.status?.pending_sources));
+  addMeta(details, "最近学习", state.status?.last_learning_at ? dateText(state.status.last_learning_at) : "暂无");
+  if (schedule.next_at || schedule.next_check_at) addMeta(details, "下次可处理", dateText(first(schedule.next_check_at, schedule.next_at)));
+  const groups = byId("schedule-groups");
+  groups.replaceChildren();
+  for (const group of array(schedule.groups).slice(0, 12)) {
+    const row = node("div", "", "schedule-group");
+    const text = `${group.group_id || "群"} · ${group.purpose === "observation" ? "群表达" : "相处记忆"}`;
+    row.append(node("span", text), node("span", `${group.phase === "cheap" ? "低价" : "常规"} · ${scheduleNames[group.state] || group.state || "等待"}`, "muted small"));
+    if (group.sample_count != null) row.append(node("small", `样本 ${group.sample_count}${group.minimum == null ? "" : ` / 门槛 ${group.minimum}`}`, "muted"));
+    if (group.reason) row.append(node("small", group.reason, "muted"));
+    groups.append(row);
+  }
+  groups.hidden = !groups.children.length;
+  byId("direction-preview").textContent = cfg.evolution_guidance ? `当前进化方向：${string(cfg.evolution_guidance).slice(0, 260)}${cfg.evolution_guidance.length > 260 ? "…" : ""}` : "尚未设置进化方向，可在“设置与方向”中填写。";
+  renderUsageChart(array(usage.daily));
+  renderUsageGroups(array(usage.groups));
+  renderRecentLearning(array(usage.recent));
+}
+
+function renderUsageChart(rows) {
+  const target = byId("usage-chart");
+  target.replaceChildren();
+  const days = rows.slice(-7);
+  if (!days.length) { target.append(node("p", "开始学习后，这里显示每日预算占用。", "empty")); return; }
+  const largest = Math.max(1, ...days.map((day) => counter(day.charged_tokens) || 0));
+  for (const day of days) {
+    const row = node("div", "", "chart-row");
+    const track = node("div", "", "chart-track");
+    const bar = node("div", "", "chart-fill");
+    bar.style.width = `${(counter(day.charged_tokens) || 0) / largest * 100}%`;
+    track.append(bar);
+    row.append(node("span", string(day.day).slice(5), "chart-date"), track, node("span", countText(day.charged_tokens), "chart-value"));
+    target.append(row);
+  }
+  byId("usage-chart-note").textContent = "统计含保守估算；模型未报告用量时不会显示为已测得的零消耗。";
+}
+
+function renderUsageGroups(rows) {
+  const target = byId("usage-groups");
+  target.replaceChildren();
+  if (!rows.length) { target.append(node("p", "今天暂无各群学习用量。", "empty")); return; }
+  const table = node("table", "", "usage-table");
+  const head = node("tr");
+  for (const label of ["群", "调用", "已报告", "预算占用"]) head.append(node("th", label));
+  const thead = node("thead");
+  thead.append(head);
+  const tbody = node("tbody");
+  for (const group of rows) {
+    const row = node("tr");
+    const label = node("td", first(group.group_id, group.label, "未标记群"));
+    label.append(node("small", group.platform_id || "", "muted"));
+    row.append(label, node("td", countText(group.calls)), node("td", countText(group.reported_tokens)), node("td", countText(group.charged_tokens)));
+    tbody.append(row);
+  }
+  table.append(thead, tbody);
+  target.append(table);
+}
+
+function renderRecentLearning(rows) {
+  const target = byId("learning-recent");
+  target.replaceChildren();
+  if (!rows.length) { target.append(node("p", "尚无学习记录。配置范围、预算与学习时段后，结果会显示在这里。", "empty")); return; }
+  for (const job of rows.slice(0, 20)) {
+    const row = node("article", "", "learning-row");
+    const title = node("div", "", "item-header");
+    title.append(node("strong", job.purpose === "observation" ? "群表达总结" : "相处记忆整理"), node("span", jobNames[job.status] || job.status || "待确认", "tag"));
+    const meta = node("div", "", "item-meta");
+    addMeta(meta, "时间", dateText(first(job.created_at, job.started_at)));
+    addMeta(meta, "群", job.group_id);
+    const reported = first(job.reported_tokens, job.total_tokens);
+    addMeta(meta, "用量", reported == null ? `未报告 · 预算占用 ${countText(job.charged_tokens)}` : `已报告 ${countText(reported)}`);
+    if (job.input_tokens != null || job.output_tokens != null) addMeta(meta, "输入 / 输出", `${countText(job.input_tokens)} / ${countText(job.output_tokens)}`);
+    let summary = typeof job.summary === "string" ? job.summary : "";
+    if (!summary && job.summary && typeof job.summary === "object") {
+      const detail = job.summary;
+      const labels = { memories: "采纳记忆", memory_count: "采纳记忆", styles: "采纳表达", style_count: "采纳表达", source_count: "样本", reason: "说明" };
+      summary = Object.entries(detail).map(([key, value]) => `${labels[key] || key}：${string(value)}`).join(" · ");
+    }
+    if (!summary && job.metadata && typeof job.metadata === "object") {
+      const detail = job.metadata;
+      const parts = [];
+      if (detail.sample_count != null) parts.push(`样本 ${detail.sample_count} 条`);
+      if (detail.accepted_memories != null) parts.push(`采纳记忆 ${detail.accepted_memories} 条`);
+      if (detail.accepted_styles != null) parts.push(`采纳表达 ${detail.accepted_styles} 条`);
+      if (detail.phase) parts.push(detail.phase === "cheap" ? "低价时段" : "常规时段");
+      summary = parts.join(" · ");
+    }
+    if (job.error_type) addMeta(meta, "错误类型", job.error_type);
+    row.append(title, meta, node("p", summary || "用量与处理状态已记录。", "muted small"));
+    target.append(row);
+  }
 }
 
 function fillVersions(kind, versions) {
@@ -351,7 +682,17 @@ byId("dialog-form").addEventListener("submit", (event) => {
 byId("core-content").addEventListener("input", () => { coreDirty = true; renderCoreDirty(); });
 byId("core-versions").addEventListener("change", () => { renderVersion("core"); setAvailability(); });
 byId("style-versions").addEventListener("change", () => { renderVersion("style"); setAvailability(); });
-byId("refresh").addEventListener("click", () => perform(() => loadState(), coreDirty ? "已刷新，未保存的核心人设草稿已保留。" : "已刷新。"));
+byId("refresh").addEventListener("click", () => perform(() => loadState(), coreDirty || configDirty ? "已刷新，未保存的草稿已保留。" : "已刷新。"));
+byId("settings-form").addEventListener("submit", (event) => { event.preventDefault(); return saveSettings(); });
+byId("config-reload").addEventListener("click", async () => {
+  if ((configDirty || coreDirty) && !await ask({ title: "重载后台配置", description: "将载入后台最新配置与目标人格，丢弃本页尚未保存的设置和核心人设草稿。", submit: "丢弃并重载", danger: true })) return;
+  await perform(async () => {
+    const previous = selectedPersona;
+    selectedPersona = "";
+    try { await loadState({ replaceCore: true }); renderConfig({ replace: true }); }
+    catch (error) { selectedPersona = previous; throw error; }
+  }, "已载入后台最新配置。");
+});
 byId("learning-toggle").addEventListener("click", () => {
   const next = !paused();
   return perform(() => action("learning_pause", { paused: next }), next ? "已暂停自动学习。" : "已恢复自动学习。");
@@ -426,7 +767,7 @@ byId("style-rollback").addEventListener("click", async () => {
 });
 
 window.addEventListener("beforeunload", (event) => {
-  if (!coreDirty) return;
+  if (!coreDirty && !configDirty) return;
   event.preventDefault();
   event.returnValue = "";
 });
