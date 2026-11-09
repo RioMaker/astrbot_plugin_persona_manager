@@ -89,6 +89,14 @@ def test_local_priority_duplicate_expression_and_recent_suppression(harness):
     text, trace = recall(harness)
     assert trace["style_ids"] == [local, other]
     assert len(payload(text)["本群表达参考"]) == 2
+    # Read-only selection is repeatable; the cooldown starts after a send.
+    assert recall(harness)[1]["style_ids"] == [local, other]
+    harness.store.record_delivery(
+        sample(harness, "sent", group="234567"),
+        "稳如老狗，牢谱",
+        [local, other],
+        keep_dialogue=False,
+    )
     assert recall(harness)[1]["style_ids"] == []
 
 
@@ -178,7 +186,7 @@ def test_change_during_global_read_cannot_inject_stale_expression(harness, mutat
 
     async def mutate(method, *args, **kwargs):
         result = await original(method, *args, **kwargs)
-        if method == "global_styles":
+        if method == "select_styles":
             if mutation == "forget":
                 harness.store.forget("cocoa", "123")
             else:

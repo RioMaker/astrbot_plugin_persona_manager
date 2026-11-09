@@ -383,7 +383,7 @@ def test_same_qq_memory_recalled_across_groups_without_crossing_user(harness):
         harness.runtime.chat_context(sample(harness, "other", user="456", group="g2"))
     )
     assert payload(own_context)["当前认知"][0]["内容"] == "以后回答简短"
-    assert payload(other_context)["当前认知"] == []
+    assert other_context == ""
     assert "source_group" not in own_context
 
 
@@ -408,7 +408,7 @@ def test_professional_request_suppresses_learned_banter(harness):
     context, detail = asyncio.run(
         harness.runtime.chat_context(sample(harness, text="帮我分析牢谱成绩"))
     )
-    assert payload(context)["本群表达参考"] == []
+    assert context == ""
     assert detail["style_ids"] == []
 
 

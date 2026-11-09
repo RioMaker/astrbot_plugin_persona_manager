@@ -88,6 +88,14 @@ def sample(event: Any, settings: Settings, purpose: str) -> dict[str, Any] | Non
         sent_at=stamp,
         purpose=purpose,
         message_id=message_id,
+        reply_to=next(
+            (
+                str(getattr(part, "id", ""))
+                for part in obj.message
+                if type(part).__name__ == "Reply"
+            ),
+            "",
+        ),
         umo=str(event.unified_msg_origin),
     )
     return identity

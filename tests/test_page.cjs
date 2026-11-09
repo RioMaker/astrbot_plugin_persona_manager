@@ -80,6 +80,38 @@ function edit(ui, key, value) {
   (field.handlers.input || field.handlers.change)();
 }
 
+test("sent conversation remains visible before any expression is learned", async () => {
+  const ui = page(); await flush();
+  ui.view.dialogues = [{user_id:"123456", user_text:"明天见", reply_text:"明天见呀", received_at:1793246400, feedback:""}];
+  await vm.runInContext('selectedScope = "qq:bot:group"; loadState()', ui.sandbox);
+  const text = textOf(ui.elements.get("styles"));
+  assert.match(text, /还没有学习到表达/);
+  assert.match(text, /明天见呀/);
+  assert.match(text, /未知/);
+});
+
+for (const mode of ["saved", "conflict", "unconfirmed"]) {
+  test(`expression editing preserves conditions and revision: ${mode}`, async () => {
+    const ui = page(mode === "conflict" ? {postError:new Error("表达已更新")} : {unconfirmed:mode === "unconfirmed"});
+    await flush();
+    vm.runInContext('editExpression({id:9, revision:4, form_type:"response", situation:"对方道别", expression:"简短道别后停住", avoid:["还有问题"], intent:"closing", keywords:[]})', ui.sandbox);
+    ui.elements.get("expression-keywords").value = "明天见，晚安";
+    await ui.elements.get("expression-form").handlers.submit({preventDefault(){}, submitter:{disabled:false}});
+    assert.equal(ui.posts[0].payload.action, "style_edit");
+    assert.equal(ui.posts[0].payload.revision, 4);
+    assert.deepEqual(ui.posts[0].payload.form.keywords, ["明天见","晚安"]);
+    assert.equal(ui.posts[0].payload.form.intent, "closing");
+    if (mode === "saved") {
+      assert.equal(ui.elements.get("expression-dialog").open, false);
+      assert.match(ui.elements.get("notice").textContent, /待审核/);
+    } else {
+      assert.equal(ui.elements.get("expression-dialog").open, true);
+      assert.equal(ui.elements.get("expression-pattern").value, "简短道别后停住");
+      assert.equal(ui.elements.get("expression-error").hidden, false);
+    }
+  });
+}
+
 test("global toggle and tag editor persist without enabling collection", async () => {
   const ui = page(); await flush();
   ui.view.groups = [knownGroup()];

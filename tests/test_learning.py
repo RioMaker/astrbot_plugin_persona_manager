@@ -1,8 +1,11 @@
 import json
 
 import pytest
-
-from learning import build_prompt, extract_explicit_preferences, parse_learning_response
+from astrbot_plugin_persona_manager.learning import (
+    build_prompt,
+    extract_explicit_preferences,
+    parse_learning_response,
+)
 
 
 def source(text="我最近在练双手交替", **overrides):
@@ -350,7 +353,7 @@ def test_complete_time_expression_overrides_model_chosen_substring():
 
 
 def test_iso_date_is_not_filtered_as_a_phone_number():
-    from learning import learning_sources
+    from astrbot_plugin_persona_manager.learning import learning_sources
 
     text = "我2026-10-20完成了十首练习曲"
     sources = learning_sources("interaction", [source(text)])

@@ -19,7 +19,7 @@
   },
   "global_style_groups": {
     "type": "list",
-    "description": "允许使用全局梗的群",
+    "description": "允许使用跨群表达的群",
     "default": [],
     "hint": "推荐在群列表开启。默认只用本群表达；开启后按群标签筛选同人格下其他群已启用的表达，不开启采集或人物记忆。"
   },
@@ -203,5 +203,29 @@
     "description": "进化方向提示词",
     "default": "",
     "hint": "最多4000字。由你指定学习关注点、表达目标及需要减少的习惯；只指导有证据的学习，不自动改核心人设、不增加工具权限。"
+  },
+  "expression_per_turn": {
+    "description": "每轮表达经验上限",
+    "type": "int",
+    "default": 2,
+    "hint": "按情境选择0至2条，0关闭注入，不改变采集。"
+  },
+  "expression_cooldown_seconds": {
+    "description": "表达发送后的冷却秒数",
+    "type": "int",
+    "default": 3600,
+    "hint": "仅确认发送的注入计入冷却，重启后仍有效。"
+  },
+  "memory_context_chars": {
+    "description": "记忆上下文字数预算",
+    "type": "int",
+    "default": 800,
+    "hint": "称呼等固定偏好和相关往事分配独立额度；仍受总上下文上限约束。"
+  },
+  "expression_context_chars": {
+    "description": "表达上下文字数预算",
+    "type": "int",
+    "default": 400,
+    "hint": "只加入本轮相关的经验，可为0；不会新增模型分类或润色调用。"
   }
 }

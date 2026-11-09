@@ -6,6 +6,10 @@ from typing import Any, Mapping
 from .style_matching import parse_tag_entry
 
 INT_LIMITS = {
+    "expression_per_turn": (2, 0, 2),
+    "expression_cooldown_seconds": (3600, 0, 86400),
+    "memory_context_chars": (800, 200, 2400),
+    "expression_context_chars": (400, 0, 1000),
     "batch_size": (30, 1, 60),
     "min_observation_batch": (20, 2, 60),
     "learning_interval_seconds": (1800, 60, 86400),
@@ -45,6 +49,10 @@ def entries(value: Any) -> frozenset[str]:
 
 @dataclass(frozen=True)
 class Settings:
+    expression_per_turn: int = 2
+    expression_cooldown_seconds: int = 3600
+    memory_context_chars: int = 800
+    expression_context_chars: int = 400
     enabled: bool = True
     persona_id: str = "可可子"
     observation_groups: frozenset[str] = field(default_factory=frozenset)

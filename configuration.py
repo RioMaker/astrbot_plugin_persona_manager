@@ -14,6 +14,12 @@ SCHEMA = json.loads(
     (Path(__file__).parent / "_conf_schema.json").read_text(encoding="utf-8")
 )
 SECTIONS = {
+    "检索与表达": {
+        "expression_per_turn",
+        "expression_cooldown_seconds",
+        "memory_context_chars",
+        "expression_context_chars",
+    },
     "基础与范围": {
         "enabled",
         "persona_id",

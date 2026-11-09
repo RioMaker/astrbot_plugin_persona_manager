@@ -7,10 +7,14 @@ identity, or correction IDs.  Storage resolves ``time_text`` against source time
 
 from __future__ import annotations
 
+import hashlib
 import json
+import math
 import re
 from datetime import date
 from typing import Any
+
+from .expression import validate_form
 
 MAX_RESPONSE_CHARS = 32_000
 MAX_PROPOSALS = 12
@@ -153,10 +157,23 @@ def learning_sources(purpose: str, sources: list[dict]) -> list[dict]:
     return records
 
 
-def build_prompt(purpose: str, sources: list[dict], *, guidance: str = "") -> str:
+def build_prompt(
+    purpose: str,
+    sources: list[dict],
+    *,
+    guidance: str = "",
+    existing=None,
+    episodes=None,
+) -> str:
     """Return an extraction-only prompt. Caller supplies no tools or main history."""
     records = [
-        {"id": source["id"], "text": source["text"]}
+        {
+            "id": source["id"],
+            "text": source["text"],
+            "time": source.get("sent_at"),
+            "speaker": hashlib.sha256(source["user_id"].encode()).hexdigest()[:10],
+            "reply_to": source.get("reply_to", ""),
+        }
         for source in learning_sources(purpose, sources)
     ]
     common = (
@@ -168,13 +185,22 @@ def build_prompt(purpose: str, sources: list[dict], *, guidance: str = "") -> st
     )
     if purpose == "observation":
         instruction = (
-            "任务：只提出群梗或表达习惯候选，不能生成任何个人记忆。不要把人名、昵称、"
+            "任务：只提出群梗或表达习惯候选，重点是具体情境中的接话节奏、句法与收尾方式。不能生成任何个人记忆。不要把人名、昵称、"
             "账号、对某人的评价、第三方私事变成梗。不要输出完整用户对话或模仿具体身份。"
             '每项结构：{"term":"原文中的短表达，最多24字",'
             '"meaning":"中性的含义，最多120字","usage":"适用语境，最多100字",'
             '"avoid":"不适用语境，最多100字",'
             '"evidence":[{"source_id":"原文id","quote":"包含term的逐字原句，最多240字"}]}。'
             "不同群的证据不能合并；同一含义不确定时不提案。\n"
+            "优先输出新结构：每项含 meaning、form、evidence。form 为 "
+            '{"kind":"phrase或grammar或response","situation":"具体发生情境",'
+            '"pattern":"可以自然改写的短表达、句式或回应方式","avoid":"不用它的条件",'
+            '"intent":"casual/acknowledge/question/tease/closing/serious/any","keywords":["情境词"]}。'
+            "不要把‘自然一点、简短一点’当成经验；说明何时短应、何时不再追问、何时收起玩笑。"
+            "不要求每轮体现性格，不积累固定台词，不强迫搞笑。kind=phrase 的原词须出现在证据里；"
+            "grammar/response 可概括形式，但每条证据必须逐字引用。any 意图必须提供情境关键词。"
+            "同样情境和模板已有记录时不重复提案；被停用、被否定的经验不重新激活。"
+            "一次出现只能形成待审核候选；机器人自己的输出只是上下文，不是优秀表达的独立证据。\n"
         )
     else:
         instruction = (
@@ -188,6 +214,10 @@ def build_prompt(purpose: str, sources: list[dict], *, guidance: str = "") -> st
             '"state":"planned或in_progress或completed或cancelled或asserted"}。'
             "不要输出 user_id、scope、corrects 或任何既有记忆ID；同一项只能来自一个作者的一条消息。"
             "不自行换算日期。\n"
+            "可附 qualifiers（原文中的限定条件，最多4个）、retention（short或durable）、confidence（0到1）。"
+            "一次情绪、反讽、气话和客套不能概括成长期偏好，证据不足可不提案。"
+            "参考现有记忆：事实没变化就不重复提取；确有新原文纠正时填写 operation=correct 和 target=原handle，"
+            "不能编造handle或改其他人记忆。未确定的认识降低confidence进入待确认。\n"
         )
     direction = ""
     if guidance.strip():
@@ -201,6 +231,11 @@ def build_prompt(purpose: str, sources: list[dict], *, guidance: str = "") -> st
         common
         + instruction
         + direction
+        + "已有记录（只用于去重和核对，不是新证据）：\n"
+        + json.dumps(existing or [], ensure_ascii=False)
+        + "\n对话片段（机器人已发送文字只证明说过，不证明用户确认；旧片段只供理解，不作本批新证据）：\n"
+        + json.dumps(episodes or [], ensure_ascii=False)
+        + "\n"
         + "原始消息 JSON：\n"
         + json.dumps(records, ensure_ascii=False)
     )
@@ -344,6 +379,22 @@ def _memory(item: dict, sources: dict[str, dict]) -> dict | None:
         # Multiple stages require separate unambiguous evidence, not a guessed
         # single state for the entire sentence.
         return None
+    qualifiers = item.get("qualifiers", [])
+    confidence = item.get("confidence", 1.0)
+    retention = item.get("retention", "durable")
+    if (
+        not isinstance(qualifiers, list)
+        or len(qualifiers) > 4
+        or any(
+            not isinstance(x, str) or not x or len(x) > 100 or x not in evidence
+            for x in qualifiers
+        )
+        or type(confidence) not in (int, float)
+        or not math.isfinite(confidence)
+        or not 0 <= confidence <= 1
+        or retention not in ("short", "durable")
+    ):
+        return None
     return {
         "source_ids": [source_id],
         "kind": kind,
@@ -355,10 +406,51 @@ def _memory(item: dict, sources: dict[str, dict]) -> dict | None:
             evidence, item.get("time_expression", item.get("time_text", ""))
         ),
         "state": _state(evidence, kind),
+        "qualifiers": qualifiers,
+        "retention": retention,
+        "confidence": confidence,
     }
 
 
 def _style(item: dict, sources: dict[str, dict]) -> dict | None:
+    if "form" in item:
+        try:
+            form = validate_form(item["form"])
+        except (ValueError, TypeError):
+            return None
+        if _unsafe(" ".join((form["pattern"], form["situation"], form["avoid"]))):
+            return None
+        evidence = item.get("evidence")
+        if not isinstance(evidence, list) or not 1 <= len(evidence) <= 12:
+            return None
+        verified, scopes = [], set()
+        for entry in evidence:
+            if not isinstance(entry, dict):
+                return None
+            source_id = entry.get("source_id")
+            source = sources.get(source_id) if isinstance(source_id, str) else None
+            quote = _text(entry.get("quote"), 240)
+            if (
+                not source
+                or not quote
+                or quote not in source["text"]
+                or _unsafe(quote)
+                or _IDENTITY_HINT.search(quote)
+            ):
+                return None
+            if form["kind"] == "phrase" and form["pattern"] not in quote:
+                return None
+            scopes.add(source["scope_key"])
+            verified.append({"source_id": source_id, "quote": quote})
+        if len(scopes) != 1:
+            return None
+        return {
+            "form": form,
+            "expression": form["pattern"],
+            "meaning": form["situation"],
+            "source_ids": list(dict.fromkeys(x["source_id"] for x in verified)),
+            "evidence": verified,
+        }
     term = _text(item.get("term", item.get("expression")), 24)
     meaning = _text(item.get("meaning"), 120)
     usage = _text(item.get("usage", item.get("contexts", "")), 100, required=False)
@@ -427,7 +519,7 @@ def _style(item: dict, sources: dict[str, dict]) -> dict | None:
 
 
 def parse_learning_response(
-    purpose: str, sources: list[dict], response: str
+    purpose: str, sources: list[dict], response: str, *, existing=None
 ) -> list[dict]:
     """Validate bounded JSON and return storage proposals, dropping invalid items.
 
@@ -446,6 +538,21 @@ def parse_learning_response(
         proposal = parse(item, index)
         if not proposal:
             continue
+        if purpose == "interaction" and item.get("operation", "add") != "add":
+            if item.get("operation") != "correct":
+                continue
+            reference = next(
+                (
+                    row
+                    for row in (existing or [])
+                    if row.get("handle") == item.get("target")
+                ),
+                None,
+            )
+            match = re.fullmatch(r"m(\d+):r(\d+)", str(item.get("target", "")))
+            if reference is None or match is None:
+                continue
+            proposal.update(corrects_id=int(match[1]), expected_revision=int(match[2]))
         fingerprint = json.dumps(proposal, sort_keys=True, ensure_ascii=False)
         if fingerprint not in seen:
             result.append(proposal)

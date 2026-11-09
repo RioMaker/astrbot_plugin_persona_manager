@@ -8,6 +8,7 @@ let selectedPersona = "";
 let selectedUser = "";
 let selectedScope = "";
 let dialogRequest = null;
+let editingExpression = null;
 let configBase = {};
 let configSchema = {};
 let configRevision = "";
@@ -102,7 +103,8 @@ async function loadState({ replaceCore = false } = {}) {
 }
 
 async function action(actionName, payload = {}, { replaceCore = false } = {}) {
-  await bridge.apiPost("action", { action: actionName, persona_id: selectedPersona, user_id: selectedUser, scope_key: selectedScope, ...payload });
+  const result = await bridge.apiPost("action", { action: actionName, persona_id: selectedPersona, user_id: selectedUser, scope_key: selectedScope, ...payload });
+  if (result?.saved !== true) throw new Error("管理接口未确认保存，请刷新核对结果。");
   try {
     await loadState({ replaceCore });
   } catch (error) {
@@ -233,7 +235,7 @@ function renderGroupPicker() {
     ? "当前总开关关闭或学习已暂停。可先选择群，恢复学习后才会收集新样本。"
     : configControls.get("memory_enabled")?.checked === false
       ? "互动记忆总开关已关闭，已选的互动记忆群暂不生效。"
-      : "旁听与互动控制采集。全局梗独立控制跨群使用：不启用采集，也不开放白名单；按本群标签筛选同人格已启用表达。本群表达优先。";
+      : "旁听与互动控制采集。跨群表达独立控制跨群使用：不启用采集，也不开放白名单；按本群标签筛选同人格已启用表达。本群表达优先。";
   const visible = groups.filter((group) => {
     const selected = Object.values(flags(group)).some(Boolean);
     return (!query || `${group.group_name || ""} ${group.group_id} ${group.platform_id} ${group.bot_id} ${groupTagText(group)}`.toLocaleLowerCase().includes(query))
@@ -252,7 +254,7 @@ function renderGroupPicker() {
     const meta = node("p", `群号 ${group.group_id} · 连接 ${group.platform_id} · 机器人 ${group.bot_id}`, "muted small");
     const seen = node("p", `首次发现：${dateText(group.first_seen)} · 最近发现：${dateText(group.last_seen)}${counter(group.member_count) !== null ? ` · ${group.member_count} 人` : ""}`, "muted small");
     const toggles = node("div", "", "group-toggles");
-    for (const [kind, field, labelText] of [["observation", "observation_groups", "旁听学梗"], ["memory", "memory_groups", "互动记忆"], ["global", "global_style_groups", "允许使用全局梗"]]) {
+    for (const [kind, field, labelText] of [["observation", "observation_groups", "旁听学表达"], ["memory", "memory_groups", "互动记忆"], ["global", "global_style_groups", "允许使用跨群表达"]]) {
       const label = node("label", "", "group-toggle");
       const checkbox = node("input");
       checkbox.type = "checkbox";
@@ -691,8 +693,16 @@ function renderMemories() {
     addMeta(meta, "状态", memoryStates[memory.state] || first(memory.state, memory.status));
     if (corrected) addMeta(meta, "记录", "已被纠正");
     addMeta(meta, "置信度", memory.confidence);
+    addMeta(meta, "用途", memory.pinned ? "固定偏好" : "按话题召回");
+    addMeta(meta, "适用条件", array(memory.qualifiers).join("；"));
+    if (memory.status === "pending") addMeta(meta, "审核", "待确认 · 不参与召回");
+    if (memory.status === "rejected") addMeta(meta, "审核", "已拒绝 · 不参与召回");
     const actions = node("div", "", "item-actions");
-    actions.append(mutationButton("纠正", () => correctMemory(memory), { available: Boolean(recordId(memory)) && !corrected }), mutationButton("忘记", () => forgetMemory(memory), { danger: true, available: Boolean(recordId(memory)) }));
+    actions.append(mutationButton("纠正", () => correctMemory(memory), { available: Boolean(recordId(memory)) && memory.status === "active" }), mutationButton("忘记", () => forgetMemory(memory), { danger: true, available: Boolean(recordId(memory)) }));
+    if (memory.status === "active") actions.append(mutationButton(memory.pinned ? "取消固定" : "设为固定偏好", () => perform(() => action(memory.pinned ? "memory_unpin" : "memory_pin", {memory_id: memory.id, revision: memory.revision}), "记忆用途已更新。")));
+    if (memory.status === "pending") {
+      actions.append(mutationButton("确认记忆", () => perform(() => action("memory_approve", {memory_id: memory.id, revision: memory.revision}), "记忆已确认。")), mutationButton("拒绝提案", () => perform(() => action("memory_reject", {memory_id: memory.id, revision: memory.revision}), "提案已拒绝。")));
+    }
     card.append(head, node("p", recordText(memory), "item-content"), meta, detailsFor(memory), actions);
     target.append(card);
   });
@@ -721,7 +731,6 @@ function renderStyles() {
   byId("style-count").textContent = `${styles.length} 条表达`;
   if (!styles.length) {
     target.append(node("p", selectedScope ? "这个群还没有学习到表达习惯。" : "选择一个群后查看表达习惯。", "empty"));
-    return;
   }
   styles.forEach((style) => {
     const disabled = style.enabled === false || style.disabled === true || style.status === "disabled";
@@ -732,8 +741,16 @@ function renderStyles() {
     addMeta(meta, "学习时间", dateText(first(style.created_at, style.learned_at)));
     addMeta(meta, "适用情境", first(style.contexts, style.situation, style.context));
     addMeta(meta, "避免用于", style.avoid);
-    addMeta(meta, "使用次数", first(style.use_count, style.count));
+    addMeta(meta, "经验类型", ({phrase:"短表达", grammar:"句法习惯", response:"接话与收尾"})[style.form_type]);
+    addMeta(meta, "确认发送的注入", style.injections);
+    addMeta(meta, "短语出现在回复中", style.uses);
+    addMeta(meta, "明确好评 / 负评", `${style.positive || 0} / ${style.negative || 0}`);
+    addMeta(meta, "复审原因", style.review_reason);
     card.append(head, node("p", recordText(style), "item-content"), meta, detailsFor(style));
+    const reviewActions = node("div", "", "item-actions");
+    reviewActions.append(mutationButton("编辑经验", () => editExpression(style)));
+    if (style.status !== "active") reviewActions.append(mutationButton("审核启用", () => perform(() => action("style_approve", {style_id: style.id, revision: style.revision}), "该经验已审核启用。")));
+    card.append(reviewActions);
     if (!disabled) {
       const actions = node("div", "", "item-actions");
       actions.append(mutationButton("停用此表达", async () => {
@@ -744,7 +761,49 @@ function renderStyles() {
     }
     target.append(card);
   });
+  const turns = array(state.dialogues);
+  if (turns.length) {
+    const history = node("section", "", "card");
+    history.append(node("h3", "近期实际对话"), node("p", "这里只展示框架确认发送后的回复。未明确反馈表示未知；句法习惯是否实际采用不作自动推断。", "muted small"));
+    for (const turn of turns) {
+      const item = node("details");
+      item.append(node("summary", `${dateText(turn.received_at)} · ${turn.user_id}`), node("p", `用户：${turn.user_text}`), node("p", `可可子：${turn.reply_text || "本轮没有可记录的文字"}`), node("p", `反馈：${({positive:"明确认可",negative:"明确纠正",positive_unattributed:"认可，未归因到具体经验",negative_unattributed:"负面评价，未归因到具体经验"})[turn.feedback] || "未知"}`, "muted small"));
+      history.append(item);
+    }
+    target.append(history);
+  }
 }
+
+function editExpression(style) {
+  editingExpression = style;
+  for (const [field, value] of Object.entries({kind:style.form_type, situation:style.situation || array(style.contexts).join("；"), pattern:style.expression, avoid:array(style.avoid).join("；"), intent:style.intent, keywords:array(style.keywords).join("，")})) byId(`expression-${field}`).value = value || "";
+  byId("expression-error").hidden = true;
+  byId("expression-dialog").showModal();
+}
+
+byId("expression-cancel").addEventListener("click", () => byId("expression-dialog").close());
+byId("expression-form").addEventListener("submit", async (event) => {
+  event.preventDefault();
+  if (busy || !editingExpression) return;
+  const submit = event.submitter;
+  if (submit) submit.disabled = true;
+  busy = true;
+  setAvailability();
+  try {
+    const form = Object.fromEntries(["kind", "situation", "pattern", "avoid", "intent"].map((field) => [field, byId(`expression-${field}`).value.trim()]));
+    form.keywords = byId("expression-keywords").value.split(/[,，、]/).map((value) => value.trim()).filter(Boolean);
+    await action("style_edit", {style_id:editingExpression.id, revision:editingExpression.revision, form});
+    byId("expression-dialog").close();
+    notice("经验已保存为待审核。审核启用后用于聊天。");
+  } catch (error) {
+    byId("expression-error").textContent = error.message || "保存失败";
+    byId("expression-error").hidden = false;
+  } finally {
+    busy = false;
+    if (submit) submit.disabled = false;
+    setAvailability();
+  }
+});
 
 function ask(options) {
   if (dialogRequest) return Promise.resolve(null);

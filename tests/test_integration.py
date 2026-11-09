@@ -9,6 +9,7 @@ import time
 from contextlib import asynccontextmanager
 from pathlib import Path
 from types import SimpleNamespace
+from unittest.mock import AsyncMock
 
 import pytest
 from astrbot_plugin_persona_manager.ingress import own_text, sample
@@ -273,6 +274,10 @@ def test_accepted_request_preserves_other_plugins_and_marks_context_temporary(en
     async def run():
         async with entry.running() as env:
             event = MockEvent(extras={"access_gate_original_text": "以后回答简短"})
+            # Seed a prior, approved preference so this checks non-empty injection.
+            await env.plugin.runtime.capture(
+                sample(event, env.plugin.settings(), "interaction")
+            )
             req = request()
             before = snapshot(req)
             first_part = req.extra_user_content_parts[0]
@@ -301,6 +306,10 @@ def test_repeated_request_and_send_hooks_do_not_duplicate_context_or_memory(entr
     async def run():
         async with entry.running() as env:
             event = MockEvent(extras={"access_gate_original_text": "以后回答简短"})
+            # Seed a prior, approved preference so this checks non-empty injection.
+            await env.plugin.runtime.capture(
+                sample(event, env.plugin.settings(), "interaction")
+            )
             req = request()
             await env.plugin.on_request(event, req)
             await env.plugin.on_request(event, req)
@@ -496,6 +505,101 @@ def test_dashboard_rejects_unauthenticated_state_and_action(entry):
     asyncio.run(run())
 
 
+def test_dashboard_memory_review_requires_login_current_revision_and_owner(entry):
+    from astrbot_plugin_persona_manager.learning import extract_explicit_preferences
+
+    async def run():
+        async with entry.running() as env:
+            store = env.plugin.store
+            original = sample(MockEvent("以后回答简短"), Settings(), "interaction")
+            store.add_source(original)
+            proposals = extract_explicit_preferences([original])
+            proposals[0]["confidence"] = 0.6
+            memory_id = store.apply_memories(proposals, store.epoch())[0]
+            env.request.payload = {
+                "action": "memory_approve",
+                "memory_id": memory_id,
+                "revision": 1,
+            }
+            env.request.username = None
+            assert (await route(env.context, "action")()).status_code == 403
+            assert store.get_memory(memory_id)["status"] == "pending"
+            env.request.username = "admin"
+            assert (await route(env.context, "action")()).status_code == 200
+            assert store.get_memory(memory_id)["status"] == "active"
+            env.request.payload = {
+                "action": "memory_pin",
+                "memory_id": memory_id,
+                "revision": 1,
+            }
+            assert (await route(env.context, "action")()).status_code == 400
+            env.request.payload.update(revision=2, user_id="654321")
+            assert (await route(env.context, "action")()).status_code == 400
+            env.request.payload["user_id"] = original["user_id"]
+            assert (await route(env.context, "action")()).status_code == 200
+            assert store.get_memory(memory_id)["pinned"]
+            assert env.context.llm_generate.await_count == 0
+
+    asyncio.run(run())
+
+
+def test_dashboard_expression_edit_requires_review_and_cannot_revive_forgotten(entry):
+    async def run():
+        async with entry.running() as env:
+            store = env.plugin.store
+            original = sample(MockEvent("这局稳住了"), Settings(), "observation")
+            store.add_source(original)
+            form = {
+                "kind": "phrase",
+                "situation": "闲聊表现稳定",
+                "pattern": "稳住了",
+                "avoid": "求助",
+                "intent": "casual",
+                "keywords": [],
+            }
+            style_id = store.apply_styles(
+                [
+                    {
+                        "form": form,
+                        "source_ids": [original["id"]],
+                        "evidence": [
+                            {"source_id": original["id"], "quote": "这局稳住了"}
+                        ],
+                    }
+                ],
+                store.epoch(),
+            )[0]
+            env.request.payload = {
+                "action": "style_edit",
+                "style_id": style_id,
+                "revision": 1,
+                "form": {**form, "kind": "grammar", "pattern": "简短肯定后停住"},
+            }
+            assert (await route(env.context, "action")()).status_code == 200
+            assert store.get_style(style_id)["status"] == "candidate"
+            env.request.payload = {
+                "action": "style_approve",
+                "style_id": style_id,
+                "revision": 1,
+            }
+            assert (await route(env.context, "action")()).status_code == 400
+            env.request.payload["revision"] = 2
+            assert (await route(env.context, "action")()).status_code == 200
+            assert store.get_style(style_id)["status"] == "active"
+            revision = store.get_style(style_id)["revision"]
+            store.forget("可可子", original["user_id"])
+            env.request.payload = {
+                "action": "style_edit",
+                "style_id": style_id,
+                "revision": revision,
+                "form": form,
+            }
+            assert (await route(env.context, "action")()).status_code == 400
+            assert store.get_style(style_id) is None
+
+    asyncio.run(run())
+
+
 def test_initialize_never_overwrites_native_persona_and_observer_priority(entry):
     async def run():
         async with entry.running() as env:
@@ -591,7 +695,9 @@ def test_actual_gate_then_persona_preserves_routing_and_private_zero_cost(
             if case == "chat":
                 assert event.get_extra("access_gate_original_text") == text
                 assert not event.call_llm and event.is_at_or_wake_command
-                assert len(req.extra_user_content_parts) == 2
+                assert (
+                    len(req.extra_user_content_parts) == 1
+                )  # No empty filler context.
                 event._has_send_oper = True
                 await env.plugin.after_sent(event)
                 assert (
@@ -744,6 +850,10 @@ def test_only_delivered_main_result_or_finished_stream_records_interaction(
             await handler(event)
             await handler(event)
             assert len(env.plugin.store.timeline("可可子", "123456")) == int(recorded)
+            assert len(env.plugin.store.dialogue_history("可可子")) == int(recorded)
+            assert env.plugin.store.db.execute(
+                "SELECT count(*) FROM delivery_receipts"
+            ).fetchone()[0] == int(recorded)
 
     asyncio.run(run())
 
@@ -759,6 +869,20 @@ def test_empty_stream_finish_never_records_interaction(entry):
             event._result.chain = []
             await env.plugin.after_stream(event)
             assert env.plugin.store.timeline("可可子", "123456") == []
+
+    asyncio.run(run())
+
+
+def test_forget_during_main_generation_cannot_relearn_the_delayed_turn(entry):
+    async def run():
+        async with entry.running() as env:
+            event = MockEvent(extras={"access_gate_original_text": "以后回答简短"})
+            await env.plugin.on_request(event, request())
+            env.plugin.store.forget("可可子", "123456")
+            await env.plugin.after_sent(event)
+            assert env.plugin.store.timeline("可可子", "123456") == []
+            assert env.plugin.store.dialogue_history("可可子") == []
+            assert env.plugin.store.pending_learning(persona_id="可可子") == []
 
     asyncio.run(run())
 
@@ -847,7 +971,9 @@ def test_actual_professional_tool_filters_survive_persona_hook(entry):
             req.func_tool = shared
             for hook in hooks:
                 owner = SimpleNamespace(
-                    config={"llm_tool_enabled": False}, _config_get=lambda *_: False
+                    config={"llm_tool_enabled": False},
+                    _config_get=lambda *_: False,
+                    _user_access_error=AsyncMock(return_value=""),
                 )
                 await hook(owner, event, req)
             assert [t.name for t in req.func_tool.tools] == ["query_rtlink"]

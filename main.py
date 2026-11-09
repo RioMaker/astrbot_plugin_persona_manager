@@ -31,6 +31,7 @@ PLUGIN_NAME = "astrbot_plugin_persona_manager"
 GATE_NAME = "astrbot_plugin_access_gate"
 PENDING_KEY = PLUGIN_NAME + ":interaction"
 SENT_KEY = PLUGIN_NAME + ":sent"
+TRACE_KEY = PLUGIN_NAME + ":learning_trace"
 
 
 class PersonaManagerPlugin(Star):
@@ -217,8 +218,21 @@ class PersonaManagerPlugin(Star):
             source = sample(event, settings, "interaction")
             if source is None:
                 return
-            if settings.remembers(source["group_id"], source["platform_id"]):
+            if (
+                settings.remembers(source["group_id"], source["platform_id"])
+                or settings.observes(source["group_id"], source["platform_id"])
+                or settings.uses_global_styles(
+                    source["group_id"], source["platform_id"]
+                )
+            ):
                 event.set_extra(PENDING_KEY, source)
+            feedback_source = dict(
+                source,
+                purpose="interaction"
+                if settings.remembers(source["group_id"], source["platform_id"])
+                else "observation",
+            )
+            await self.runtime.observe_feedback(feedback_source)
             # Serialize with Dashboard mutations through the actual injection.
             async with self.runtime.lock:
                 context, detail = await self.runtime.chat_context(source)
@@ -237,6 +251,9 @@ class PersonaManagerPlugin(Star):
                 if len(self._debug) >= 100:
                     self._debug.pop(next(iter(self._debug)))
                 self._debug[source["scope_key"]] = detail
+                event.set_extra(
+                    TRACE_KEY, {**detail, "epoch": await self.runtime.db("epoch")}
+                )
         except Exception:
             logger.warning("[可可子人格] 上下文补充失败，继续原对话。")
 
@@ -274,13 +291,20 @@ class PersonaManagerPlugin(Star):
         source = event.get_extra(PENDING_KEY, None)
         if not isinstance(source, dict):
             return
-        if not settings.remembers(source["group_id"], source["platform_id"]):
-            return
         try:
             if not await self._gate_allowed(event) or not await self._selected(event):
                 return
             event.set_extra(SENT_KEY, True)
-            await self.runtime.capture(source)
+            trace = event.get_extra(TRACE_KEY, {})
+            result = event.get_result()
+            reply = "".join(
+                str(part.text)
+                for part in getattr(result, "chain", [])
+                if type(part).__name__ == "Plain"
+            )
+            await self.runtime.record_delivery(
+                source, reply, trace, epoch=trace.get("epoch")
+            )
         except Exception:
             logger.warning("[可可子人格] 相处记忆记录跳过，消息已按原流程发送。")
 
@@ -405,6 +429,13 @@ class PersonaManagerPlugin(Star):
                 )
             versions = await self.runtime.db("style_versions", scope) if scope else []
             for version in versions:
+                saved = json.loads(version.pop("snapshot_json", "{}"))
+                if saved:
+                    version["content"] = "\n".join(
+                        f"[{row['status']}] {row['expression']}\n适用：{row['situation']}\n避用：{'；'.join(row['avoid'])}"
+                        for row in saved.values()
+                    )
+                    continue
                 active_ids = json.loads(version["active_ids"])
                 labels = []
                 for style_id in active_ids:
@@ -459,6 +490,11 @@ class PersonaManagerPlugin(Star):
                     if scope
                     else [],
                     "style_versions": versions,
+                    "dialogues": await self.runtime.db(
+                        "dialogue_history", persona_id, scope, user
+                    )
+                    if scope or user
+                    else [],
                 }
             )
         except (ValueError, TypeError) as exc:
@@ -515,7 +551,14 @@ class PersonaManagerPlugin(Star):
                         persona_id, system_prompt=content
                     )  # Do not touch tools, skills, dialogs or other personas.
                     await self.runtime.db("set_core", persona_id, content)
-                elif action in {"memory_forget", "memory_correct"}:
+                elif action in {
+                    "memory_forget",
+                    "memory_correct",
+                    "memory_pin",
+                    "memory_unpin",
+                    "memory_approve",
+                    "memory_reject",
+                }:
                     record_id = self._id(payload.get("memory_id"))
                     memory = await self.runtime.db("get_memory", record_id)
                     if memory is None or memory["persona_id"] != persona_id:
@@ -525,7 +568,19 @@ class PersonaManagerPlugin(Star):
                         and str(payload["user_id"]) != memory["user_id"]
                     ):
                         raise ValueError("QQ与记忆不匹配")
-                    if action == "memory_forget":
+                    if action in {
+                        "memory_pin",
+                        "memory_unpin",
+                        "memory_approve",
+                        "memory_reject",
+                    }:
+                        await self.runtime.db(
+                            "manage_memory",
+                            record_id,
+                            action=action.removeprefix("memory_"),
+                            revision=self._id(payload.get("revision")),
+                        )
+                    elif action == "memory_forget":
                         await self.runtime.db(
                             "forget", persona_id, memory["user_id"], record_id
                         )
@@ -556,25 +611,49 @@ class PersonaManagerPlugin(Star):
                         "forget", persona_id, self._qq(payload.get("user_id"))
                     )
                     self._debug.clear()
-                elif action in {"style_disable", "style_rollback"}:
+                elif action in {
+                    "style_disable",
+                    "style_rollback",
+                    "style_approve",
+                    "style_edit",
+                }:
                     scopes = {
                         x["scope_key"]
                         for x in await self.runtime.db("scopes", persona_id)
                     }
-                    if action == "style_disable":
+                    if action != "style_rollback":
                         style = await self.runtime.db(
                             "get_style", self._id(payload.get("style_id"))
                         )
-                        if style is None or style["scope_key"] not in scopes:
+                        if (
+                            style is None
+                            or style["scope_key"] not in scopes
+                            or style["persona_id"] != persona_id
+                        ):
                             raise ValueError("表达不存在")
                         if (
                             payload.get("scope_key")
                             and payload["scope_key"] != style["scope_key"]
                         ):
                             raise ValueError("群与表达不匹配")
-                        await self.runtime.db(
-                            "set_style_status", style["id"], "disabled"
-                        )
+                        if (
+                            action in {"style_approve", "style_edit"}
+                            and self._id(payload.get("revision")) != style["revision"]
+                        ):
+                            raise ValueError("表达已更新，请刷新后重试")
+                        if action == "style_edit":
+                            await self.runtime.db(
+                                "edit_style",
+                                style["id"],
+                                payload.get("form"),
+                                revision=style["revision"],
+                            )
+                        else:
+                            await self.runtime.db(
+                                "set_style_status",
+                                style["id"],
+                                "active" if action == "style_approve" else "disabled",
+                            )
                     else:
                         scope = payload.get("scope_key")
                         if scope not in scopes:

@@ -114,7 +114,7 @@
       </section>
 
       <section id="panel-style" aria-labelledby="style-title" hidden>
-        <div class="section-heading"><div><h2 id="style-title">按群管理表达习惯</h2><p class="muted">已启用表达同时作为全局梗候选；目标群需开启全局梗并匹配标签。停用、遗忘与回滚对跨群使用同步生效。</p></div><span id="style-count" class="count">0 条表达</span></div>
+        <div class="section-heading"><div><h2 id="style-title">按群管理表达习惯</h2><p class="muted">已启用表达同时作为跨群表达候选；目标群需开启跨群表达并匹配标签。停用、遗忘与回滚对跨群使用同步生效。</p></div><span id="style-count" class="count">0 条表达</span></div>
         <form id="scope-form" class="card filter-bar">
           <div class="field grow"><label for="scope-key">群与平台</label><select id="scope-key" disabled><option value="">请选择群</option></select></div>
           <button type="submit" class="primary" disabled>查看群表达</button>
@@ -145,6 +145,20 @@
         <div id="dialog-confirm-field" class="field" hidden><label for="dialog-confirm">输入该用户 QQ 号以确认</label><input id="dialog-confirm" autocomplete="off" /></div>
         <p id="dialog-error" class="field-error" role="alert" hidden></p>
         <div class="dialog-actions"><button id="dialog-cancel" type="button">取消</button><button id="dialog-submit" type="submit" class="primary">确认</button></div>
+      </form>
+    </dialog>
+    <dialog id="expression-dialog" aria-labelledby="expression-title">
+      <form id="expression-form">
+        <h2 id="expression-title">编辑表达经验</h2>
+        <p class="muted">保存后进入待审核；审核启用后，才会按情境用于聊天。</p>
+        <div class="field"><label for="expression-kind">经验类型</label><select id="expression-kind"><option value="phrase">短表达</option><option value="grammar">句法习惯</option><option value="response">接话与收尾</option></select></div>
+        <div class="field"><label for="expression-situation">什么时候适用</label><textarea id="expression-situation" rows="2" required maxlength="200"></textarea></div>
+        <div class="field"><label for="expression-pattern">说法或回应方式</label><textarea id="expression-pattern" rows="3" required maxlength="300"></textarea></div>
+        <div class="field"><label for="expression-avoid">什么时候不用</label><textarea id="expression-avoid" rows="2" maxlength="200"></textarea></div>
+        <div class="field"><label for="expression-intent">对话情境</label><select id="expression-intent"><option value="casual">普通闲聊</option><option value="acknowledge">简短应声</option><option value="question">提问</option><option value="tease">明确玩笑</option><option value="closing">道别收尾</option><option value="serious">认真话题（保留，自动注入暂停）</option><option value="any">由关键词限定</option></select></div>
+        <div class="field"><label for="expression-keywords">情境关键词（逗号分隔，可留空）</label><input id="expression-keywords" maxlength="200" /></div>
+        <p id="expression-error" class="field-error" role="alert" hidden></p>
+        <div class="dialog-actions"><button id="expression-cancel" type="button">取消</button><button type="submit" class="primary">保存为待审核</button></div>
       </form>
     </dialog>
     <script type="module" src="./app.js"></script>
