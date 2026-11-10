@@ -1066,6 +1066,8 @@ class StorageBase:
         global_tokens: int,
         group_tokens: int,
         metadata=None,
+        memory_daily_tokens=None,
+        memory_monthly_tokens=None,
     ) -> int | None:
         """Atomically reserve calls and conservative tokens in persistent storage.
 
@@ -1097,6 +1099,20 @@ class StorageBase:
         if reserved <= 0:
             return None
         with self.transaction():
+            if purpose == "interaction":
+                for limit, period in (
+                    (memory_daily_tokens, day),
+                    (memory_monthly_tokens, day[:7]),
+                ):
+                    if limit is not None:
+                        if token_count(limit) is None:
+                            raise ValueError("Invalid memory token limit")
+                        used = self.db.execute(
+                            "SELECT COALESCE(sum(charged_tokens),0) FROM learning_usage WHERE purpose='interaction' AND day LIKE ?",
+                            (period + "%",),
+                        ).fetchone()[0]
+                        if used + reserved > limit:
+                            return None
             for key, call_limit, token_limit in (
                 ("*", global_calls, global_tokens),
                 (scope_key, group_calls, group_tokens),

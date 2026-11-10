@@ -51,6 +51,7 @@ class PersonaManagerPlugin(Star):
             self.settings,
             logger,
             source_guard=self._source_allowed,
+            thinking_callback=self._thinking_notice,
         )
         self._debug = {}
         self.discovery = GroupDiscovery(self.runtime)
@@ -65,6 +66,14 @@ class PersonaManagerPlugin(Star):
 
     def settings(self):
         return Settings.read(self.config)
+
+    async def _thinking_notice(self, source):
+        if await self._source_allowed(source):
+            from astrbot.api.event import MessageChain
+
+            await self.context.send_message(
+                source["umo"], MessageChain().message("正在思考，整理一下刚才的记忆……")
+            )
 
     async def initialize(self):
         self.runtime.start()
@@ -451,6 +460,19 @@ class PersonaManagerPlugin(Star):
                     "choices": await self._page_choices(),
                     "usage": usage_for_page(usage, self.settings()),
                     "schedule": self.runtime.scheduler_status,
+                    "classifiers": await self.runtime.db("classifiers", persona_id),
+                    "memory_catalog": await self.runtime.db(
+                        "memory_catalog",
+                        persona_id,
+                        user_id=str(request.query.get("catalog_user", ""))[:100],
+                        class_id=str(request.query.get("catalog_class", ""))[:64],
+                        status=str(request.query.get("catalog_status", ""))[:30],
+                        offset=max(0, int(request.query.get("catalog_offset", 0))),
+                    ),
+                    "memory_usage": await self.runtime.db("memory_usage", day),
+                    "last_dream": await self.runtime.db(
+                        "get_meta", "last_dream:" + persona_id, None
+                    ),
                     "status": {
                         **await self.runtime.db("stats"),
                         "paused": await self.runtime.paused(),
@@ -528,6 +550,38 @@ class PersonaManagerPlugin(Star):
                     if not isinstance(payload.get("paused"), bool):
                         raise ValueError("paused必须是布尔值")
                     await self.runtime.db("set_meta", "paused", payload["paused"])
+                elif action == "classifier_save":
+                    if type(payload.get("confirm", False)) is not bool:
+                        raise ValueError("确认分类须为开关值")
+                    await self.runtime.db(
+                        "save_classifier",
+                        persona_id,
+                        payload.get("definition"),
+                        revision=self._id(payload.get("revision")),
+                        confirm=payload.get("confirm", False),
+                        cache_capacity=self.settings().short_cache_capacity,
+                        knowledge_confirmations=self.settings().knowledge_confirmations,
+                    )
+                elif action == "memory_detail_save":
+                    await self.runtime.db(
+                        "edit_memory_details",
+                        persona_id,
+                        self._id(payload.get("memory_id")),
+                        payload.get("changes"),
+                        revision=self._id(payload.get("revision")),
+                        cache_capacity=self.settings().short_cache_capacity,
+                        knowledge_confirmations=self.settings().knowledge_confirmations,
+                    )
+                elif action == "memory_dream":
+                    await self.runtime.db("dream", persona_id)
+                elif action == "knowledge_force":
+                    await self.runtime.db(
+                        "force_knowledge",
+                        persona_id,
+                        payload.get("content"),
+                        payload.get("key"),
+                        actor=request.username,
+                    )
                 elif action in {"core_save", "core_rollback"}:
                     if action == "core_save":
                         content = payload.get("content")

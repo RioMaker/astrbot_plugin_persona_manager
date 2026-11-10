@@ -39,7 +39,7 @@
     "type": "list",
     "description": "互动记忆群白名单",
     "default": [],
-    "hint": "推荐在管理页按群名勾选。新群默认关闭；空列表不记录或使用人物记忆。升级保留历史数据，重新选择群即可使用。"
+    "hint": "关闭默认启用时，使用此列表选择允许互动记忆的群。"
   },
   "memory_disabled_groups": {
     "type": "list",
@@ -172,13 +172,13 @@
     "type": "int",
     "description": "常规价互动批量门槛",
     "default": 3,
-    "hint": "同群同 QQ 累计条数，1～60。明确简单偏好仍即时本地记录，无模型调用。"
+    "hint": "兼容旧配置保留；2.0 的记忆整理统一使用“记忆整理触发条数”，低价时段只调整冷却。"
   },
   "cheap_interaction_batch": {
     "type": "int",
     "description": "低价互动批量门槛",
     "default": 1,
-    "hint": "同群同 QQ 累计条数，1～60。"
+    "hint": "兼容旧配置保留；2.0 的记忆整理统一使用“记忆整理触发条数”，低价时段只调整冷却。"
   },
   "cheap_observation_batch": {
     "type": "int",
@@ -227,5 +227,71 @@
     "type": "int",
     "default": 400,
     "hint": "只加入本轮相关的经验，可为0；不会新增模型分类或润色调用。"
+  },
+  "memory_batch_threshold": {
+    "type": "int",
+    "default": 20,
+    "description": "记忆整理触发条数",
+    "hint": "每个群积累达到此条数后批量调用模型；每条已回复用户消息计一条，实际机器人回复一同整理。"
+  },
+  "short_cache_capacity": {
+    "type": "int",
+    "default": 30,
+    "description": "短期缓存容量",
+    "hint": "每个用户的缓存容量，跨群合计；满时淘汰最旧记录，读取仍按来源群隔离。"
+  },
+  "knowledge_confirmations": {
+    "type": "int",
+    "default": 3,
+    "description": "知识独立确认次数",
+    "hint": "同一人同一天只算一次，重复批次不计；达到门槛后启用。"
+  },
+  "auto_dream": {
+    "type": "bool",
+    "default": true,
+    "description": "定时入梦",
+    "hint": "每天按北京时间入梦，清理日常记忆；关闭后可手动入梦。"
+  },
+  "dream_hour": {
+    "type": "int",
+    "default": 4,
+    "description": "入梦小时（北京时间）",
+    "hint": "0～23，默认凌晨4点；入梦不额外调用AI。"
+  },
+  "memory_default_enabled": {
+    "type": "bool",
+    "default": true,
+    "description": "默认启用门禁放行群的互动记忆",
+    "hint": "仍受门禁、目标人格和禁用群限制。关闭后仅明确选中的群启用。"
+  },
+  "public_memory_groups": {
+    "type": "list",
+    "default": [],
+    "description": "允许读取公共记忆的群",
+    "hint": "默认关闭。开启后可读取同一用户在其他群的记忆；本群记忆始终单独可用。"
+  },
+  "memory_daily_mtokens": {
+    "type": "float",
+    "default": 0.06,
+    "description": "记忆整理每日限额（Mtokens）",
+    "hint": "1 Mtokens=100万tokens；0停用模型整理。包含输入、输出、失败估算和在途预留。"
+  },
+  "memory_monthly_mtokens": {
+    "type": "float",
+    "default": 1.8,
+    "description": "记忆整理每月限额（Mtokens）",
+    "hint": "北京时间自然月；与每日及原有总学习预算同时生效。0停用模型整理。"
+  },
+  "thinking_notice": {
+    "type": "bool",
+    "default": true,
+    "description": "整理时显示思考提示",
+    "hint": "开始整理前向来源群发送一次简短思考提示，控制台同步显示思考状态。"
+  },
+  "event_salience_threshold": {
+    "type": "float",
+    "default": 0.7,
+    "description": "情绪事件最低波动强度",
+    "hint": "0～1；需有实际机器人回复证据和心情，达到此强度才记为长期事件。"
   }
 }

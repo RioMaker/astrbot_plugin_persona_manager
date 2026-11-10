@@ -32,6 +32,14 @@ def compact(row):
         result["发生时间"] = date_text(row["event_start"])
     if row.get("qualifiers"):
         result["条件"] = row["qualifiers"]
+    if row.get("category"):
+        result["类型"] = row["category"]
+        result["来源性质"] = row.get("provenance", "inferred")
+        result["准确性"] = row.get("accuracy", "unconfirmed")
+        if row.get("mood"):
+            result["我的心情"] = row["mood"]
+        if row.get("details"):
+            result["详情"] = row["details"]
     return result
 
 
@@ -52,8 +60,14 @@ async def assemble(runtime, source, *, now):
         return "", empty
     profile, topical = [], []
     if remembers:
+        visibility = {
+            "scope_key": source["scope_key"],
+            "public": settings.uses_public_memory(
+                source["group_id"], source["platform_id"]
+            ),
+        }
         current = await runtime.db(
-            "profile", source["persona_id"], source["user_id"], limit=64
+            "profile", source["persona_id"], source["user_id"], limit=64, **visibility
         )
         profile = [row for row in current if row["pinned"]]
         other = [
@@ -68,8 +82,24 @@ async def assemble(runtime, source, *, now):
         )
         profile = profile[:3] + other[:2]
         topical = await runtime.db(
-            "recall", source["persona_id"], source["user_id"], source["text"], limit=8
+            "recall",
+            source["persona_id"],
+            source["user_id"],
+            source["text"],
+            limit=8,
+            **visibility,
         )
+        for owner in ("__self__", "__knowledge__"):
+            topical.extend(
+                await runtime.db(
+                    "recall",
+                    source["persona_id"],
+                    owner,
+                    source["text"],
+                    limit=2,
+                    **visibility,
+                )
+            )
         topical = [
             row for row in topical if row["id"] not in {x["id"] for x in profile}
         ][:3]
@@ -119,6 +149,7 @@ async def assemble(runtime, source, *, now):
         "当前明确纠正优先，旧目标可能过时，计划不等于完成。"
         "表达经验可自然改写或不用，不复读模板，不要求每轮接梗；普通应声可以很短，收尾不强行追问。"
         "不透露来源群和第三人隐私。\n"
+        "转述及推测是未确认认识；关系与心情是我的主观看法，不代表对方认可。\n"
     )
 
     def render():

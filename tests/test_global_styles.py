@@ -229,6 +229,7 @@ def test_tag_settings_roundtrip_and_specific_connection_override():
         {},
         {
             "global_style_groups": ["qq1:234567"],
+            "memory_default_enabled": False,
             "group_tags": ["234567=轻松，太鼓达人", "qq2:234567=技术"],
         },
     )

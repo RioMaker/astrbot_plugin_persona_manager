@@ -14,6 +14,10 @@ let configSchema = {};
 let configRevision = "";
 let configDirty = false;
 let configConflict = false;
+let catalogOffset = 0;
+let editingClassifier = null;
+let editingMemory = null;
+let catalogFilter = {};
 const configControls = new Map();
 
 const array = (value) => (Array.isArray(value) ? value : []);
@@ -23,6 +27,91 @@ const first = (...values) => values.find((value) => value !== undefined && value
 const recordId = (record) => string(first(record.id, record.memory_id, record.style_id, record.version_id));
 const recordText = (record) => string(first(record.content, record.text, record.summary, record.expression, record.pattern, record.prompt, record.core));
 const memoryStates = { active: "当前有效", asserted: "已陈述", planned: "计划中", in_progress: "进行中", completed: "已完成", cancelled: "已取消" };
+
+const categoryLabels = {timed:"短期 · 时效性", daily:"短期 · 日常（下次入梦清理）", cache:"短期 · 有限缓存", relationship:"长期 · 关系", event:"长期 · 情绪事件", knowledge:"长期 · 知识", self:"长期 · 自我认知"};
+const provenanceLabels = {self_report:"本人陈述", hearsay:"他人转述", inferred:"主观推测", self_reflection:"自我反思", admin:"管理员确认"};
+const accuracyLabels = {unconfirmed:"未核实", supported:"有来源支持", confirmed:"已核实"};
+const archiveStatusLabels = {active:"生效中",pending:"暂存待确认",expired:"已到期",rejected:"已拒绝",superseded:"旧认知",corrected:"已纠正"};
+
+function fillOptions(control, options, value) {
+  control.replaceChildren();
+  Object.entries(options).forEach(([key,label]) => { const option=node("option",label); option.value=key; control.append(option); });
+  control.value = value;
+}
+
+function renderArchive() {
+  const classes = [...array(state.classifiers)].sort((a,b)=>(a.status === "confirmed")-(b.status === "confirmed"));
+  const target = byId("classifiers"); target.replaceChildren(); target.className="classifier-grid";
+  const pending = classes.filter(c=>c.status !== "confirmed").length;
+  target.append(node("p", `${pending} 个类型待核对，其中长期类型须确认后使用。`, "muted classifier-caption"));
+  for (const cls of classes) {
+    const item=node("article","",`classifier-row ${cls.status !== "confirmed" ? "classifier-pending" : ""}`);
+    const status={confirmed:"已确认",auto:"短期已自动通过 · 待核对",pending:"长期待确认 · 仅暂存",rejected:"已拒绝"}[cls.status] || cls.status;
+    item.append(node("strong",cls.name),node("span",`${categoryLabels[cls.category]} · ${status}`,"tag"),node("p",cls.description,"muted"));
+    item.append(node("p",array(cls.keywords).join(" · "),"small"),mutationButton("编辑 / 确认分类",()=>editClassifier(cls)));
+    target.append(item);
+  }
+  const classDraft=byId("catalog-class").value;
+  fillOptions(byId("catalog-class"), {"":"全部类型",...Object.fromEntries(classes.map(c=>[c.id,c.name]))}, classDraft || catalogFilter.catalog_class || "");
+  const budget=object(state.memory_usage), values=object(state.config?.values);
+  const daily=Number(budget.daily?.mtokens || 0), monthly=Number(budget.monthly?.mtokens || 0);
+  byId("memory-budget").replaceChildren(node("h3",state.schedule?.state === "thinking" ? "正在思考并整理记忆" : "整理用量与入梦"),node("p",`今日 ${daily.toFixed(6)} / ${values.memory_daily_mtokens ?? "—"} Mtokens · 本月 ${monthly.toFixed(6)} / ${values.memory_monthly_mtokens ?? "—"} Mtokens`),node("p",`1 Mtokens = 100万 tokens；包含在途预留与未知用量估算。最近入梦：${dateText(state.last_dream)}`,"muted small"));
+  const catalog=object(state.memory_catalog), items=array(catalog.items);
+  byId("catalog-count").textContent=`共 ${catalog.total || 0} 条 · 当前 ${catalogOffset + (items.length ? 1 : 0)}–${catalogOffset + items.length}`;
+  const list=byId("catalog-items"); list.replaceChildren();
+  if (!items.length) list.append(node("p","暂无符合条件的记忆。","empty"));
+  for (const memory of items) {
+    const card=node("article","","card memory-card");
+    const owner=memory.user_id === "__self__" ? "自我认知" : memory.user_id === "__knowledge__" ? "知识库" : `用户 ${memory.user_id}`;
+    card.append(node("h3",`${memory.key || "已清理内容"} · ${owner}`),node("p",`${memory.class_name || categoryLabels[memory.category]} · ${archiveStatusLabels[memory.status] || memory.status} · ${provenanceLabels[memory.provenance] || memory.provenance}`,"tag"),node("p",memory.content,"item-content"));
+    card.append(node("p",`准确性：${accuracyLabels[memory.accuracy] || memory.accuracy} · 置信度 ${memory.confidence} · 核实 ${memory.confirmations || 0} 次 · 心情：${memory.mood || "未记录"}`,"muted"));
+    if (memory.expires_at) card.append(node("p",`有效至 ${dateText(memory.expires_at)}`,"small"));
+    if (memory.hold_reason) card.append(node("p", memory.hold_reason === "classification" ? "待管理员确认分类，不参与聊天召回。" : "知识证据尚未达到门槛，不参与聊天召回。","field-hint"));
+    card.append(detailsFor(memory));
+    const actions=node("div","","item-actions");
+    if (["active","pending","rejected"].includes(memory.status)) actions.append(mutationButton("编辑全部细节",()=>editMemoryDetails(memory)));
+    actions.append(mutationButton("忘记", async()=>{
+      if (await ask({title:"忘记记忆",description:memory.content,danger:true})) await perform(()=>action("memory_forget",{memory_id:memory.id,user_id:memory.user_id}),"记忆已遗忘。");
+    },{danger:true}));
+    card.append(actions); list.append(card);
+  }
+}
+
+function editClassifier(cls) {
+  if (busy || !ready) return;
+  editingClassifier=cls;
+  byId("classifier-name").value=cls.name;
+  fillOptions(byId("classifier-category"),categoryLabels,cls.category);
+  byId("classifier-description").value=cls.description;
+  byId("classifier-tags").value=array(cls.keywords).join("，");
+  byId("classifier-ttl").value=cls.ttl_seconds;
+  byId("classifier-confirm").checked=cls.status === "confirmed";
+  byId("classifier-error").textContent="";
+  byId("classifier-dialog").showModal();
+}
+
+function editMemoryDetails(memory) {
+  if (busy || !ready) return;
+  editingMemory=memory;
+  const target=byId("memory-detail-fields"); target.replaceChildren();
+  const classes=Object.fromEntries(array(state.classifiers).map(c=>[c.id,c.name]));
+  const fields=[
+    ["class_id","记忆分类",classes], ["key","主题 / 独立特性"], ["content","记忆正文","textarea"],
+    ["provenance","信息来源",provenanceLabels], ["accuracy","准确性",accuracyLabels],
+    ["confidence","置信度（0～1）","number"], ["mood","当时我的心情"], ["salience","情绪波动（0～1）","number"],
+    ["ttl_seconds","时效记忆有效期（秒）","number"], ["tags","关键词标签（逗号分隔）"],
+    ["relationship","我认为的关系"], ["address","称呼"], ["person_info","人物信息","textarea"], ["utterance","对我说过的话","textarea"]
+  ];
+  for (const [key,label,type] of fields) {
+    const wrap=node("div","","field"), name=node("label",label); name.htmlFor=`detail-${key}`;
+    const control=node(typeof type === "object" ? "select" : type === "textarea" ? "textarea" : "input"); control.id=`detail-${key}`;
+    let value=key === "tags" ? array(memory.tags).join("，") : memory[key] ?? memory.details?.[key] ?? "";
+    if (typeof type === "object") fillOptions(control,type,value);
+    else {control.value=value; if (type === "number") { control.type="number"; control.step=key === "ttl_seconds" ? "1" : "0.01"; control.min=key === "ttl_seconds" ? "1" : "0"; control.max=key === "ttl_seconds" ? "2592000" : "1";} else control.maxLength=600;}
+    wrap.append(name,control); target.append(wrap);
+  }
+  byId("memory-detail-error").textContent=""; byId("memory-detail-dialog").showModal();
+}
 
 function node(tag, text = "", className = "") {
   const result = document.createElement(tag);
@@ -94,6 +183,7 @@ async function loadState({ replaceCore = false } = {}) {
   if (selectedPersona) params.persona_id = selectedPersona;
   if (selectedUser) params.user_id = selectedUser;
   if (selectedScope) params.scope_key = selectedScope;
+  Object.assign(params, catalogFilter, {catalog_offset: catalogOffset});
   const result = await bridge.apiGet("state", params);
   if (!result || typeof result !== "object" || Array.isArray(result)) throw new Error("管理接口返回了无法识别的数据。");
   state = result;
@@ -116,7 +206,7 @@ function renderState(replaceCore) {
   const status = object(state.status);
   const isPaused = paused();
   const disabledByConfig = status.enabled === false || status.learning_enabled === false;
-  byId("learning-status").textContent = disabledByConfig ? "配置已关闭学习" : isPaused ? "学习已暂停" : "学习已开启";
+  byId("learning-status").textContent = disabledByConfig ? "配置已关闭学习" : isPaused ? "学习已暂停" : state.schedule?.state === "thinking" ? "正在思考 · 整理记忆" : "学习已开启";
   byId("learning-status").className = `status-pill ${isPaused || disabledByConfig ? "paused" : "running"}`;
   byId("learning-toggle").textContent = isPaused ? "恢复学习" : "暂停学习";
   byId("status-detail").textContent = string(status);
@@ -136,6 +226,7 @@ function renderState(replaceCore) {
   fillVersions("style", array(state.style_versions));
   renderConfig();
   renderOverview();
+  renderArchive();
 }
 
 function renderCoreDirty() {
@@ -225,8 +316,9 @@ function renderGroupPicker() {
   const groups = array(state?.groups);
   const flags = (group) => ({
     observation: groupMatches("observation_groups", group),
-    memory: groupMatches("memory_groups", group) && !groupMatches("memory_disabled_groups", group),
+    memory: (configControls.get("memory_default_enabled")?.checked || groupMatches("memory_groups", group)) && !groupMatches("memory_disabled_groups", group),
     global: groupMatches("global_style_groups", group),
+    public: groupMatches("public_memory_groups", group),
   });
   const selectedCount = groups.filter((group) => Object.values(flags(group)).some(Boolean)).length;
   byId("group-count").textContent = `${groups.length} 个群 · 已选 ${selectedCount}`;
@@ -254,7 +346,7 @@ function renderGroupPicker() {
     const meta = node("p", `群号 ${group.group_id} · 连接 ${group.platform_id} · 机器人 ${group.bot_id}`, "muted small");
     const seen = node("p", `首次发现：${dateText(group.first_seen)} · 最近发现：${dateText(group.last_seen)}${counter(group.member_count) !== null ? ` · ${group.member_count} 人` : ""}`, "muted small");
     const toggles = node("div", "", "group-toggles");
-    for (const [kind, field, labelText] of [["observation", "observation_groups", "旁听学表达"], ["memory", "memory_groups", "互动记忆"], ["global", "global_style_groups", "允许使用跨群表达"]]) {
+    for (const [kind, field, labelText] of [["observation", "observation_groups", "旁听学表达"], ["memory", "memory_groups", "互动记忆"], ["global", "global_style_groups", "允许使用跨群表达"], ["public", "public_memory_groups", "允许读取公共记忆"]]) {
       const label = node("label", "", "group-toggle");
       const checkbox = node("input");
       checkbox.type = "checkbox";
@@ -265,7 +357,7 @@ function renderGroupPicker() {
       checkbox.addEventListener("change", () => {
         if (busy || !ready || configConflict || !configRevision) return;
         setGroupEntry(field, group, checkbox.checked);
-        if (kind === "memory" && checkbox.checked) setGroupEntry("memory_disabled_groups", group, false);
+        if (kind === "memory") setGroupEntry("memory_disabled_groups", group, !checkbox.checked);
         const focusId = checkbox.id;
         updateConfigDirty();
         byId(focusId)?.focus();
@@ -359,10 +451,10 @@ function renderConfig({ replace = false } = {}) {
       }
     } else {
       control = node("input");
-      control.type = schema.type === "int" ? "number" : "text";
+      control.type = ["int", "float"].includes(schema.type) ? "number" : "text";
       control.value = configValueText(configBase[name], schema);
-      if (schema.type === "int") {
-        control.step = "1";
+      if (["int", "float"].includes(schema.type)) {
+        control.step = schema.type === "float" ? "any" : "1";
         if (schema.minimum !== undefined) control.min = schema.minimum;
         if (schema.maximum !== undefined) control.max = schema.maximum;
       }
@@ -396,7 +488,7 @@ function renderConfig({ replace = false } = {}) {
       field.append(node("p", "方向引导学习取舍与表达，不自动改写固定人设，不增加工具能力。", "field-hint"), example);
     }
     configControls.set(name, control);
-    if (["observation_groups", "memory_groups", "memory_disabled_groups", "global_style_groups", "group_tags"].includes(name)) {
+    if (["observation_groups", "memory_groups", "memory_disabled_groups", "global_style_groups", "group_tags", "public_memory_groups"].includes(name)) {
       const advanced = node("details", "", "wide-field group-advanced");
       advanced.append(node("summary", `高级：${schema.description}（与群开关同步）`), field);
       sections.get(sectionKey).append(advanced);
@@ -428,6 +520,9 @@ function changedConfigValues() {
       if (!/^-?\d+$/.test(control.value.trim())) throw new Error(`${schema.description || name}：请填写整数。`);
       value = Number(control.value);
       if (!Number.isSafeInteger(value) || (schema.minimum !== undefined && value < schema.minimum) || (schema.maximum !== undefined && value > schema.maximum)) throw new Error(`${schema.description || name}：超出允许范围 ${schema.minimum ?? "不限"}～${schema.maximum ?? "不限"}。`);
+    } else if (schema.type === "float") {
+      value = Number(control.value);
+      if (!control.value.trim() || !Number.isFinite(value) || value < 0 || value > (schema.maximum ?? 10000)) throw new Error(`${schema.description}：请填写0～${schema.maximum ?? 10000}的数字。`);
     } else if (schema.type === "list") value = [...new Set(control.value.split(/\r?\n/).map((item) => item.trim()).filter(Boolean))];
     else value = control.value.trim();
     if (name === "evolution_guidance" && value.length > 4000) throw new Error("进化方向最多 4000 字。");
@@ -780,6 +875,48 @@ function editExpression(style) {
   byId("expression-error").hidden = true;
   byId("expression-dialog").showModal();
 }
+
+byId("classifier-cancel").addEventListener("click",()=>byId("classifier-dialog").close());
+byId("memory-detail-cancel").addEventListener("click",()=>byId("memory-detail-dialog").close());
+byId("classifier-form").addEventListener("submit",async(event)=>{
+  event.preventDefault(); if (busy || !ready || !editingClassifier) return;
+  await perform(async()=>{
+    const definition={id:editingClassifier.id,name:byId("classifier-name").value,category:byId("classifier-category").value,description:byId("classifier-description").value,keywords:byId("classifier-tags").value.split(/[,，、\n]/).map(x=>x.trim()).filter(Boolean),ttl_seconds:Number(byId("classifier-ttl").value)};
+    try {await action("classifier_save",{definition,revision:editingClassifier.revision,confirm:byId("classifier-confirm").checked}); byId("classifier-dialog").close();}
+    catch(error){byId("classifier-error").textContent=error.message;throw error;}
+  },"分类已保存，相关缓存已同步迁移。");
+});
+byId("memory-detail-form").addEventListener("submit",async(event)=>{
+  event.preventDefault(); if (busy || !ready || !editingMemory) return;
+  await perform(async()=>{
+    const changes={details:{...object(editingMemory.details)}};
+    for (const key of ["class_id","key","content","provenance","accuracy","mood"]) changes[key]=byId(`detail-${key}`).value;
+    for (const key of ["confidence","salience","ttl_seconds"]) changes[key]=Number(byId(`detail-${key}`).value);
+    changes.tags=byId("detail-tags").value.split(/[,，、\n]/).map(x=>x.trim()).filter(Boolean);
+    for (const key of ["relationship","address","person_info","utterance"]) changes.details[key]=byId(`detail-${key}`).value;
+    try {await action("memory_detail_save",{memory_id:editingMemory.id,revision:editingMemory.revision,changes}); byId("memory-detail-dialog").close();}
+    catch(error){byId("memory-detail-error").textContent=error.message;throw error;}
+  },"记忆细节已保存。");
+});
+byId("catalog-form").addEventListener("submit",async(event)=>{
+  event.preventDefault(); catalogOffset=0;
+  const owner=byId("catalog-owner-type").value;
+  catalogFilter={catalog_user:owner === "self" ? "__self__" : owner === "knowledge" ? "__knowledge__" : owner === "person" ? byId("catalog-user").value.trim() : "",catalog_class:byId("catalog-class").value,catalog_status:byId("catalog-status").value};
+  await perform(()=>loadState());
+});
+byId("catalog-owner-type").addEventListener("change",()=>{byId("catalog-user-field").hidden=byId("catalog-owner-type").value !== "person";});
+byId("catalog-prev").addEventListener("click",()=>perform(async()=>{catalogOffset=Math.max(0,catalogOffset-100);await loadState();}));
+byId("catalog-next").addEventListener("click",()=>perform(async()=>{if(catalogOffset+100 < Number(state.memory_catalog?.total || 0))catalogOffset+=100;await loadState();}));
+byId("dream-now").addEventListener("click",async()=>{
+  if(await ask({title:"现在入梦",description:"清理当前人格所有日常记忆；时效、缓存和长期记忆继续按各自规则保留。",submit:"入梦并清理"})) await perform(()=>action("memory_dream"),"已入梦，日常记忆已清理。");
+});
+byId("knowledge-form").addEventListener("submit",async(event)=>{
+  event.preventDefault();
+  await perform(async()=>{await action("knowledge_force",{key:byId("knowledge-key").value,content:byId("knowledge-content").value});byId("knowledge-key").value="";byId("knowledge-content").value="";},"管理员确认的知识已录入。");
+});
+if (typeof window.setInterval === "function") window.setInterval(()=>{
+  if(ready && !busy && !coreDirty && !configDirty && !document.querySelector("dialog[open]")) perform(()=>loadState());
+},10000);
 
 byId("expression-cancel").addEventListener("click", () => byId("expression-dialog").close());
 byId("expression-form").addEventListener("submit", async (event) => {

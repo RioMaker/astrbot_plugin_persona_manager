@@ -1,11 +1,16 @@
 """Bounded, fail-closed settings. Private chat is deliberately not configurable."""
 
+import math
 from dataclasses import dataclass, field
 from typing import Any, Mapping
 
 from .style_matching import parse_tag_entry
 
 INT_LIMITS = {
+    "memory_batch_threshold": (20, 1, 60),
+    "short_cache_capacity": (30, 1, 1000),
+    "knowledge_confirmations": (3, 2, 20),
+    "dream_hour": (4, 0, 23),
     "expression_per_turn": (2, 0, 2),
     "expression_cooldown_seconds": (3600, 0, 86400),
     "memory_context_chars": (800, 200, 2400),
@@ -49,6 +54,17 @@ def entries(value: Any) -> frozenset[str]:
 
 @dataclass(frozen=True)
 class Settings:
+    memory_batch_threshold: int = 20
+    short_cache_capacity: int = 30
+    knowledge_confirmations: int = 3
+    dream_hour: int = 4
+    auto_dream: bool = True
+    memory_default_enabled: bool = True
+    thinking_notice: bool = True
+    event_salience_threshold: float = 0.7
+    memory_daily_mtokens: float = 0.06
+    memory_monthly_mtokens: float = 1.8
+    public_memory_groups: frozenset[str] = field(default_factory=frozenset)
     expression_per_turn: int = 2
     expression_cooldown_seconds: int = 3600
     memory_context_chars: int = 800
@@ -96,6 +112,9 @@ class Settings:
             "memory_enabled",
             "learning_enabled",
             "price_aware_learning",
+            "auto_dream",
+            "memory_default_enabled",
+            "thinking_notice",
         ):
             values[name] = config.get(name, True) is True
         values["persona_id"] = str(config.get("persona_id", "可可子") or "").strip()
@@ -109,6 +128,7 @@ class Settings:
             "memory_groups",
             "memory_disabled_groups",
             "ignored_qq",
+            "public_memory_groups",
         ):
             values[name] = entries(config.get(name, []))
         for name in ("learning_windows", "cheap_learning_windows"):
@@ -122,6 +142,19 @@ class Settings:
         )
         for name, (default, low, high) in INT_LIMITS.items():
             values[name] = integer(config.get(name, default), default, low, high)
+        for name, default in (
+            ("memory_daily_mtokens", 0.06),
+            ("memory_monthly_mtokens", 1.8),
+            ("event_salience_threshold", 0.7),
+        ):
+            value = config.get(name, default)
+            values[name] = (
+                float(value)
+                if type(value) in (int, float)
+                and math.isfinite(value)
+                and 0 <= value <= (1 if name == "event_salience_threshold" else 10000)
+                else default
+            )
         return cls(**values)
 
     def group_in(self, group_id: str, platform_id: str, values: frozenset[str]) -> bool:
@@ -133,12 +166,18 @@ class Settings:
     def remembers(self, group_id: str, platform_id: str) -> bool:
         return (
             self.memory_enabled
-            and self.group_in(group_id, platform_id, self.memory_groups)
+            and (
+                self.memory_default_enabled
+                or self.group_in(group_id, platform_id, self.memory_groups)
+            )
             and not self.group_in(group_id, platform_id, self.memory_disabled_groups)
         )
 
     def uses_global_styles(self, group_id: str, platform_id: str) -> bool:
         return self.group_in(group_id, platform_id, self.global_style_groups)
+
+    def uses_public_memory(self, group_id: str, platform_id: str) -> bool:
+        return self.group_in(group_id, platform_id, self.public_memory_groups)
 
     def tags_for(self, group_id: str, platform_id: str) -> tuple[str, ...]:
         parsed = {}

@@ -2,6 +2,7 @@
 
 import hashlib
 import json
+import math
 import re
 from dataclasses import asdict
 from pathlib import Path
@@ -14,6 +15,15 @@ SCHEMA = json.loads(
     (Path(__file__).parent / "_conf_schema.json").read_text(encoding="utf-8")
 )
 SECTIONS = {
+    "记忆整理与入梦": {
+        "memory_batch_threshold",
+        "short_cache_capacity",
+        "knowledge_confirmations",
+        "dream_hour",
+        "auto_dream",
+        "thinking_notice",
+        "event_salience_threshold",
+    },
     "检索与表达": {
         "expression_per_turn",
         "expression_cooldown_seconds",
@@ -27,6 +37,8 @@ SECTIONS = {
         "global_style_groups",
         "group_tags",
         "memory_enabled",
+        "memory_default_enabled",
+        "public_memory_groups",
         "memory_groups",
         "memory_disabled_groups",
         "ignored_qq",
@@ -43,6 +55,8 @@ SECTIONS = {
         "daily_token_limit",
         "daily_group_token_limit",
         "max_output_tokens",
+        "memory_daily_mtokens",
+        "memory_monthly_mtokens",
     },
     "价格时段与积累": {
         "price_aware_learning",
@@ -83,6 +97,12 @@ def page_config(config) -> dict:
         )
         if key in INT_LIMITS:
             _, field["minimum"], field["maximum"] = INT_LIMITS[key]
+        if field["type"] == "float":
+            field.update(
+                minimum=0,
+                maximum=1 if key == "event_salience_threshold" else 10000,
+                step=0.001,
+            )
         if key == "evolution_guidance":
             field["maxLength"] = 4000
         schema[key] = field
@@ -109,6 +129,13 @@ def validate_changes(current, changes) -> dict:
                 or not minimum <= value <= maximum
             ):
                 raise ValueError(f"{label}须为 {minimum}～{maximum} 的整数")
+        elif kind == "float":
+            if (
+                type(value) not in (int, float)
+                or not math.isfinite(value)
+                or not 0 <= value <= (1 if key == "event_salience_threshold" else 10000)
+            ):
+                raise ValueError(f"{label}须为0～10000的有限数值")
         elif kind == "list":
             if (
                 not isinstance(value, list)
@@ -159,6 +186,8 @@ def validate_changes(current, changes) -> dict:
     for key in thresholds:
         if result[key] > result["batch_size"]:
             raise ValueError("单批最多消息数须不小于各类积累门槛")
+    if result["memory_batch_threshold"] > result["batch_size"]:
+        raise ValueError("单批最多消息数须不小于记忆整理门槛")
     if result["max_batch_chars"] < result["max_source_chars"]:
         raise ValueError("单批原文总长度上限须不小于每条采集正文长度上限")
     return result

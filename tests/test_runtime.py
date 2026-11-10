@@ -107,6 +107,9 @@ def harness(tmp_path, monkeypatch):
     config = [
         Settings(
             persona_id="cocoa",
+            memory_default_enabled=False,
+            memory_batch_threshold=1,
+            public_memory_groups=frozenset({"g1", "g2", "blocked"}),
             observation_groups=frozenset({"g1", "g2"}),
             min_observation_batch=2,
             memory_groups=frozenset({"g1", "g2", "blocked"}),
@@ -198,11 +201,14 @@ def test_success_uses_session_provider_without_tools_or_main_history(harness):
 
 
 def test_explicit_local_preference_is_saved_without_paid_call(harness):
+    harness.config[0] = replace(harness.config[0], memory_batch_threshold=20)
     asyncio.run(harness.runtime.capture(sample(harness, text="以后回答简短")))
     asyncio.run(harness.runtime.run_once())
     assert harness.context.calls == []
     assert harness.store.profile("cocoa", "123")[0]["key"] == "response_length"
-    assert harness.store.pending_sources() == []
+    assert (
+        len(harness.store.pending_sources()) == 1
+    )  # Wait for the full dialogue batch.
 
 
 def test_call_budget_and_failure_cooldown_survive_runtime_and_sqlite_reopen(harness):
@@ -232,12 +238,12 @@ def test_call_budget_and_failure_cooldown_survive_runtime_and_sqlite_reopen(harn
     assert "private user" not in repr(harness.logger.messages)
 
 
-def test_two_people_in_same_group_do_not_share_personal_batch_cooldown(harness):
+def test_two_people_in_same_group_share_a_batch_but_not_user_memory(harness):
     harness.store.add_source(sample(harness, "u1", user="123"))
     harness.store.add_source(sample(harness, "u2", user="456", text="我喜欢喝热茶"))
     asyncio.run(harness.runtime.run_once())
     asyncio.run(harness.runtime.run_once())
-    assert len(harness.context.calls) == 2
+    assert len(harness.context.calls) == 1
     assert harness.store.profile("cocoa", "123")[0]["content"] == "我喜欢喝温水"
     assert harness.store.profile("cocoa", "456")[0]["content"] == "我喜欢喝热茶"
 
@@ -671,8 +677,10 @@ def test_filtered_record_cannot_be_learned_from_mixed_model_batch(harness):
     assert harness.store.pending_sources() == []
 
 
-def test_regular_price_batches_messages_but_discount_can_process_small_batch(harness):
-    harness.config[0] = replace(harness.config[0], price_aware_learning=True)
+def test_memory_threshold_also_applies_in_discount_window(harness):
+    harness.config[0] = replace(
+        harness.config[0], price_aware_learning=True, memory_batch_threshold=3
+    )
     harness.store.add_source(sample(harness, "one"))
     asyncio.run(harness.runtime.run_once())
     assert harness.context.calls == []
@@ -681,7 +689,7 @@ def test_regular_price_batches_messages_but_discount_can_process_small_batch(har
         harness.config[0], cheap_learning_windows=frozenset({"11:00-13:00"})
     )
     asyncio.run(harness.runtime.run_once())
-    assert len(harness.context.calls) == 1
+    assert len(harness.context.calls) == 0
     assert harness.runtime.scheduler_status["phase"] == "cheap"
 
 
@@ -728,7 +736,7 @@ def test_max_wait_does_not_bypass_failure_cooldown(harness):
     assert harness.runtime.scheduler_status["state"] == "cooldown"
 
 
-def test_discount_window_end_during_provider_lookup_rechecks_batch_size(harness):
+def test_discount_window_end_during_provider_lookup_keeps_memory_threshold(harness):
     harness.config[0] = replace(
         harness.config[0],
         price_aware_learning=True,
@@ -742,9 +750,9 @@ def test_discount_window_end_during_provider_lookup_rechecks_batch_size(harness)
 
     harness.context.get_current_chat_provider_id = lookup
     asyncio.run(harness.runtime.run_once())
-    assert harness.context.calls == []
-    assert harness.runtime.scheduler_status["state"] == "deferred"
-    assert harness.store.budget_used("2026-10-29", "*") == 0
+    assert len(harness.context.calls) == 1
+    assert harness.runtime.scheduler_status["state"] == "completed"
+    assert harness.store.budget_used("2026-10-29", "*") == 1
 
 
 def test_direction_is_present_only_in_learning_prompt_and_usage_is_settled(harness):

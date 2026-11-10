@@ -133,8 +133,7 @@ class DialogueStore:
                 AND s.status NOT IN ('forgotten','expired','reviewed')"""
             args = [scope, sources[0]["persona_id"], start - 300, end + 300]
             if sources[0]["purpose"] == "interaction":
-                sql += " AND s.user_id=? AND s.purpose='interaction'"
-                args.append(sources[0]["user_id"])
+                sql += " AND s.purpose='interaction'"
             rows = self.db.execute(
                 sql + " ORDER BY s.sent_at,s.id LIMIT 80", args
             ).fetchall()

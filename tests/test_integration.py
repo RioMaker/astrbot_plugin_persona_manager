@@ -44,6 +44,8 @@ def entry(monkeypatch, tmp_path):
         # Existing integration scenarios explicitly enable their test groups.
         if config is None:
             config = {"memory_groups": ["234567", "456789"]}
+        config.setdefault("memory_default_enabled", False)
+        config.setdefault("memory_batch_threshold", 1)
         plugin = module.PersonaManagerPlugin(context, config)
         await plugin.initialize()
         try:
@@ -128,7 +130,10 @@ def test_real_runtime_retrieves_same_qq_across_groups_but_not_other_users(tmp_pa
         runtime = Runtime(
             store,
             context,
-            lambda: Settings(memory_groups=frozenset({"234567", "456789"})),
+            lambda: Settings(
+                memory_groups=frozenset({"234567", "456789"}),
+                public_memory_groups=frozenset({"456789"}),
+            ),
             logging.getLogger(__name__),
         )
         try:
@@ -354,6 +359,7 @@ def test_gate_must_be_active_and_request_must_be_approved(entry, condition):
 def test_main_hooks_retrieve_same_qq_across_groups_and_page_timeline(entry):
     async def run():
         async with entry.running() as env:
+            env.plugin.config["public_memory_groups"] = ["456789"]
             first_event = MockEvent(
                 extras={"access_gate_original_text": "以后回答简短"}
             )

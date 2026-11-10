@@ -68,6 +68,59 @@ function page(options = {}) {
 }
 
 const flush = () => new Promise((resolve) => setImmediate(resolve));
+
+test("memory classifier approval sends revision and migration definition", async () => {
+  const ui=page(); await flush();
+  const cls={id:"travel",name:"出行",category:"relationship",description:"出行认识",keywords:["旅行"],ttl_seconds:1800,status:"pending",revision:3};
+  ui.view.classifiers=[cls];
+  await vm.runInContext("loadState()",ui.sandbox);
+  vm.runInContext(`editClassifier(${JSON.stringify(cls)})`,ui.sandbox);
+  ui.elements.get("classifier-category").value="timed";
+  ui.elements.get("classifier-ttl").value="300";
+  ui.elements.get("classifier-confirm").checked=true;
+  await ui.elements.get("classifier-form").handlers.submit({preventDefault(){}});
+  assert.equal(ui.posts[0].payload.action,"classifier_save");
+  assert.equal(ui.posts[0].payload.revision,3);
+  assert.equal(ui.posts[0].payload.definition.category,"timed");
+  assert.equal(ui.posts[0].payload.definition.ttl_seconds,300);
+  assert.equal(ui.posts[0].payload.confirm,true);
+});
+
+test("memory detail editing retains evidence and reports conflicts", async () => {
+  const ui=page({postError:new Error("记忆已改变，请刷新")}); await flush();
+  const record={id:5,user_id:"123456",revision:2,class_id:"relationship",key:"称呼",content:"叫我小青",provenance:"self_report",accuracy:"supported",confidence:0.9,mood:"开心",salience:0.3,ttl_seconds:1800,tags:["称呼"],details:{address:"小青"}};
+  ui.view.classifiers=[{id:"relationship",name:"关系"}];
+  vm.runInContext(`editMemoryDetails(${JSON.stringify(record)})`,ui.sandbox);
+  ui.elements.get("detail-mood").value="平静";
+  await ui.elements.get("memory-detail-form").handlers.submit({preventDefault(){}});
+  assert.equal(ui.posts[0].payload.action,"memory_detail_save");
+  assert.equal(ui.posts[0].payload.revision,2);
+  assert.equal(ui.posts[0].payload.changes.mood,"平静");
+  assert.equal(ui.posts[0].payload.changes.details.address,"小青");
+  assert.equal(ui.elements.get("memory-detail-dialog").open,true);
+  assert.match(ui.elements.get("memory-detail-error").textContent,/记忆已改变/);
+});
+
+test("Mtokens inputs stay numeric and public memory is opt in", async () => {
+  const ui=page(); await flush();
+  ui.view.groups=[knownGroup()]; await vm.runInContext("loadState()",ui.sandbox);
+  assert.equal(ui.elements.get("group-public-qq-main-234567").checked,false);
+  const pub=ui.elements.get("group-public-qq-main-234567"); pub.checked=true; pub.handlers.change();
+  edit(ui,"memory_daily_mtokens","0.125");
+  edit(ui,"memory_monthly_mtokens","2.5");
+  await ui.elements.get("settings-form").handlers.submit({preventDefault(){}});
+  assert.equal(ui.posts[0].payload.values.memory_daily_mtokens,0.125);
+  assert.equal(ui.posts[0].payload.values.memory_monthly_mtokens,2.5);
+  assert.deepEqual(ui.posts[0].payload.values.public_memory_groups,["qq-main:234567"]);
+});
+
+test("turning off default memory saves the explicit group exclusion", async () => {
+  const ui=page(); await flush();
+  ui.view.groups=[knownGroup()]; await vm.runInContext("loadState()",ui.sandbox);
+  const control=ui.elements.get("group-memory-qq-main-234567"); control.checked=false; control.handlers.change();
+  await ui.elements.get("settings-form").handlers.submit({preventDefault(){}});
+  assert.deepEqual(ui.posts[0].payload.values.memory_disabled_groups,["qq-main:234567"]);
+});
 const textOf = (element) => [element.textContent || "", ...element.children.map(textOf)].join(" ");
 const knownGroup = (platform = "qq-main", groupId = "234567", name = "鼓友练习群") => ({
   platform_id: platform, group_id: groupId, group_name: name, bot_id: "345678",
@@ -125,7 +178,7 @@ test("global toggle and tag editor persist without enabling collection", async (
   await vm.runInContext("loadState()", ui.sandbox);
   assert.equal(ui.elements.get(tag.id).value, "太鼓达人、轻松");
   assert.equal(ui.elements.get("group-observation-qq-main-234567").checked, false);
-  assert.equal(ui.elements.get("group-memory-qq-main-234567").checked, false);
+  assert.equal(ui.elements.get("group-memory-qq-main-234567").checked, true);
   await ui.elements.get("settings-form").handlers.submit({ preventDefault() {} });
   assert.deepEqual(ui.posts[0].payload.values, {global_style_groups:["qq-main:234567"], group_tags:["qq-main:234567=太鼓达人、轻松"]});
 });
@@ -343,7 +396,7 @@ test("direction example only changes the local draft", async () => {
   assert.equal(ui.elements.get("config-dirty").textContent, "1 项未保存修改");
 });
 
-test("discovered groups show names and start with three unselected switches", async () => {
+test("discovered groups default to local memory with public memory disabled", async () => {
   const ui = page(); await flush();
   ui.view.groups = [knownGroup()];
   await vm.runInContext("loadState()", ui.sandbox);
@@ -353,7 +406,7 @@ test("discovered groups show names and start with three unselected switches", as
   assert.match(text, /qq-main/);
   assert.match(text, /42 人/);
   assert.equal(ui.elements.get("group-observation-qq-main-234567").checked, false);
-  assert.equal(ui.elements.get("group-memory-qq-main-234567").checked, false);
+  assert.equal(ui.elements.get("group-memory-qq-main-234567").checked, true);
   assert.equal(ui.elements.get("group-global-qq-main-234567").checked, false);
   assert.equal(ui.posts.length, 0);
 });
@@ -399,6 +452,7 @@ test("group search and selection filter preserve all hidden selections", async (
   const ui = page(); await flush();
   ui.view.groups = [knownGroup(), knownGroup("qq-main", "456789", "读书群")];
   ui.view.config.values.memory_groups = ["qq-main:456789"];
+  ui.view.config.values.memory_default_enabled = false;
   await vm.runInContext("loadState()", ui.sandbox);
   ui.elements.get("group-search").value = "鼓友";
   ui.elements.get("group-search").handlers.input();

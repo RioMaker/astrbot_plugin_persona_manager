@@ -38,6 +38,7 @@
         <button type="button" class="tab" data-panel="settings">设置与方向 <span id="settings-tab-dot" hidden>●</span></button>
         <button type="button" class="tab" data-panel="core">核心人设</button>
         <button type="button" class="tab" data-panel="memory">用户记忆</button>
+        <button type="button" class="tab" data-panel="archive">记忆整理与分类</button>
         <button type="button" class="tab" data-panel="style">群表达</button>
       </nav>
 
@@ -67,7 +68,7 @@
         <div id="config-conflict" class="notice error" role="alert" hidden>后台配置已有变化。草稿已保留，请重载最新配置并核对后再编辑。</div>
         <form id="settings-form">
           <article class="card group-picker" aria-labelledby="group-picker-title">
-            <div class="item-header"><div><h3 id="group-picker-title">选择学习的群</h3><p class="muted small">收到群消息后自动登记群名和群号，新群的三个开关默认关闭。勾选后点击“保存设置”；学习仍须通过原有门禁。</p></div><span id="group-count" class="count">0 个群</span></div>
+            <div class="item-header"><div><h3 id="group-picker-title">选择学习的群</h3><p class="muted small">门禁放行的群默认启用互动记忆；公共记忆与跨群表达默认关闭。修改后点击“保存设置”。</p></div><span id="group-count" class="count">0 个群</span></div>
             <div class="group-filters"><div class="field grow"><label for="group-search">搜索群</label><input id="group-search" type="search" placeholder="群名、群号、连接或标签" autocomplete="off" /></div><div class="field"><label for="group-filter">显示范围</label><select id="group-filter"><option value="all">所有已发现的群</option><option value="selected">已开启功能</option><option value="unselected">所有开关均关闭</option></select></div></div>
             <p id="group-learning-note" class="muted small"></p>
             <div id="group-list" class="group-list" aria-live="polite"></div>
@@ -111,6 +112,27 @@
         </form>
         <div id="profile" class="card profile-card" hidden></div>
         <div class="timeline" id="memories"><p class="empty">输入 QQ 号后查看该用户的记忆。</p></div>
+      </section>
+
+      <section id="panel-archive" aria-labelledby="archive-title" hidden>
+        <div class="section-heading"><div><h2 id="archive-title">记忆整理与分类器</h2><p class="muted">短期新类型自动通过并留待核对；长期新类型确认后才正式使用。修改类型会同步迁移已有缓存。</p></div><button id="dream-now" type="button">现在入梦</button></div>
+        <div id="memory-budget" class="card"></div>
+        <article class="card"><h3>分类器与待确认类型</h3><div id="classifiers" class="stack"></div></article>
+        <form id="catalog-form" class="card filter-bar">
+          <div class="field"><label for="catalog-owner-type">记忆归属</label><select id="catalog-owner-type"><option value="all">全部记忆</option><option value="person">指定用户</option><option value="self">自我认知</option><option value="knowledge">知识库</option></select></div>
+          <div id="catalog-user-field" class="field" hidden><label for="catalog-user">用户 QQ 号</label><input id="catalog-user" inputmode="numeric" placeholder="输入用户 QQ 号" /></div>
+          <div class="field"><label for="catalog-class">类型</label><select id="catalog-class"><option value="">全部类型</option></select></div>
+          <div class="field"><label for="catalog-status">状态</label><select id="catalog-status"><option value="">全部状态</option><option value="active">生效中</option><option value="pending">暂存待确认</option><option value="expired">已到期</option><option value="rejected">已拒绝</option><option value="superseded">自我认知旧版本</option></select></div>
+          <button type="submit">筛选记忆</button>
+        </form>
+        <p id="catalog-count" class="muted"></p><div id="catalog-items" class="stack"></div>
+        <div class="header-actions"><button id="catalog-prev" type="button">上一页</button><button id="catalog-next" type="button">下一页</button></div>
+        <form id="knowledge-form" class="card">
+          <h3>管理员确认知识</h3><p class="muted">你确认的知识直接进入长期知识库，保留管理员来源。群需开启公共记忆后读取。</p>
+          <div class="field"><label for="knowledge-key">知识主题</label><input id="knowledge-key" required maxlength="100" /></div>
+          <div class="field"><label for="knowledge-content">确认的知识内容</label><textarea id="knowledge-content" required rows="3" maxlength="600"></textarea></div>
+          <button type="submit" class="primary">确认并录入</button>
+        </form>
       </section>
 
       <section id="panel-style" aria-labelledby="style-title" hidden>
@@ -161,6 +183,23 @@
         <div class="dialog-actions"><button id="expression-cancel" type="button">取消</button><button type="submit" class="primary">保存为待审核</button></div>
       </form>
     </dialog>
+    <dialog id="classifier-dialog" aria-labelledby="classifier-title"><form id="classifier-form">
+      <h2 id="classifier-title">编辑分类规则</h2>
+      <p class="muted">此修改会应用到该类型现有的生效和暂存记忆，包括生命周期与有效期。</p>
+      <div class="field"><label for="classifier-name">类型名</label><input id="classifier-name" required maxlength="80" /></div>
+      <div class="field"><label for="classifier-category">记忆属性</label><select id="classifier-category"></select></div>
+      <div class="field"><label for="classifier-description">分类指导</label><textarea id="classifier-description" rows="4" required maxlength="1000"></textarea></div>
+      <div class="field"><label for="classifier-tags">关键词（逗号分隔）</label><input id="classifier-tags" maxlength="500" /></div>
+      <div class="field"><label for="classifier-ttl">时效记忆默认有效期（秒）</label><input id="classifier-ttl" type="number" min="1" max="2592000" step="1" required /></div>
+      <label><input id="classifier-confirm" type="checkbox" /> 我已确认这个分类</label>
+      <p id="classifier-error" class="field-error" role="alert"></p>
+      <div class="dialog-actions"><button id="classifier-cancel" type="button">取消</button><button type="submit" class="primary">保存并迁移</button></div>
+    </form></dialog>
+    <dialog id="memory-detail-dialog" aria-labelledby="memory-detail-title"><form id="memory-detail-form">
+      <h2 id="memory-detail-title">编辑记忆细节</h2><p class="muted">来源原话保留以供核对；修改摘要不改变原话。时效从原消息时间计算。</p>
+      <div id="memory-detail-fields"></div><p id="memory-detail-error" class="field-error" role="alert"></p>
+      <div class="dialog-actions"><button id="memory-detail-cancel" type="button">取消</button><button type="submit" class="primary">保存修改</button></div>
+    </form></dialog>
     <script type="module" src="./app.js"></script>
   </body>
 </html>

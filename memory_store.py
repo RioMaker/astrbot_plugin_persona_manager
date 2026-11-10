@@ -58,7 +58,7 @@ class MemoryStore:
                 for row in super().timeline(persona_id, user_id, limit)
             ]
 
-    def profile(self, persona_id, user_id, limit=12):
+    def profile(self, persona_id, user_id, limit=12, *, scope_key=None, public=True):
         if int(limit) <= 0:
             return []
         with self._lock:
@@ -70,6 +70,8 @@ class MemoryStore:
             output, seen = [], set()
             for raw in rows:
                 row = self._with_traits(self._memory_dict(raw))
+                if not self._visible_memory(row, scope_key, public):
+                    continue
                 if row["expires_at"] is not None and row["expires_at"] <= self.clock():
                     continue
                 if row["precision"] == "unknown":
@@ -238,10 +240,18 @@ class MemoryStore:
                 raise ValueError("该记忆当前不能执行此操作")
             self._bump_epoch()
 
-    def recall(self, persona_id, user_id, query, *, limit=4):
+    def recall(
+        self, persona_id, user_id, query, *, limit=4, scope_key=None, public=True
+    ):
         needles = sorted(terms(query))[:64]
         with self._lock:
             ids = []
+            scope_filter, scope_args = "", ()
+            if scope_key is not None and not public:
+                scope_filter = """ AND (EXISTS (SELECT 1 FROM memory_details d WHERE d.memory_id=m.id AND d.scope_key=?)
+                    OR (NOT EXISTS (SELECT 1 FROM memory_details d WHERE d.memory_id=m.id AND d.scope_key<>'')
+                    AND EXISTS (SELECT 1 FROM json_each(m.source_ids) j JOIN sources s ON s.id=j.value WHERE s.scope_key=?)))"""
+                scope_args = (scope_key, scope_key)
             if needles:
                 slots = ",".join("?" for _ in needles)
                 ids = [
@@ -249,20 +259,24 @@ class MemoryStore:
                     for x in self.db.execute(
                         f"""SELECT t.memory_id FROM memory_terms t
                     JOIN memories m ON m.id=t.memory_id WHERE t.term IN ({slots}) AND m.persona_id=?
-                    AND m.user_id=? AND m.status='active' GROUP BY t.memory_id
+                    AND m.user_id=? AND m.status='active' {scope_filter} GROUP BY t.memory_id
                     ORDER BY count(*) DESC,m.source_sent_at DESC LIMIT 200""",
-                        (*needles, persona_id, user_id),
+                        (*needles, persona_id, user_id, *scope_args),
                     )
                 ]
             if recall_requested(query):
                 ids.extend(
-                    x["id"]
-                    for x in super().timeline(persona_id, user_id, limit=100)
-                    if x["status"] == "active"
+                    x[0]
+                    for x in self.db.execute(
+                        f"SELECT m.id FROM memories m WHERE m.persona_id=? AND m.user_id=? AND m.status='active' {scope_filter} ORDER BY m.source_sent_at DESC LIMIT 100",
+                        (persona_id, user_id, *scope_args),
+                    )
                 )
             ranked = []
             for memory_id in dict.fromkeys(ids):
                 row = self.get_memory(memory_id)
+                if row and not self._visible_memory(row, scope_key, public):
+                    continue
                 if (
                     not row
                     or row["status"] != "active"
@@ -283,9 +297,13 @@ class MemoryStore:
             ranked.sort(key=lambda x: (x[0], x[1], x[2]["id"]), reverse=True)
             return [row for _, _, row in ranked[: max(0, limit)]]
 
-    def memory_references(self, persona_id, user_id, query):
-        rows = self.profile(persona_id, user_id, limit=12) + self.recall(
-            persona_id, user_id, query, limit=8
+    def memory_references(
+        self, persona_id, user_id, query, *, scope_key=None, public=True
+    ):
+        rows = self.profile(
+            persona_id, user_id, limit=12, scope_key=scope_key, public=public
+        ) + self.recall(
+            persona_id, user_id, query, limit=8, scope_key=scope_key, public=public
         )
         unique = {row["id"]: row for row in rows}
         return [
