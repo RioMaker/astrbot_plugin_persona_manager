@@ -69,9 +69,14 @@ function renderArchive() {
     card.append(node("h3",`${memory.key || "已清理内容"} · ${owner}`),node("p",`${memory.class_name || categoryLabels[memory.category]} · ${archiveStatusLabels[memory.status] || memory.status} · ${provenanceLabels[memory.provenance] || memory.provenance}`,"tag"),node("p",memory.content,"item-content"));
     card.append(node("p",`准确性：${accuracyLabels[memory.accuracy] || memory.accuracy} · 置信度 ${memory.confidence} · 核实 ${memory.confirmations || 0} 次 · 心情：${memory.mood || "未记录"}`,"muted"));
     if (memory.expires_at) card.append(node("p",`有效至 ${dateText(memory.expires_at)}`,"small"));
-    if (memory.hold_reason) card.append(node("p", memory.hold_reason === "classification" ? "待管理员确认分类，不参与聊天召回。" : "知识证据尚未达到门槛，不参与聊天召回。","field-hint"));
+    if (memory.hold_reason) card.append(node("p", {classification:"待管理员确认分类，不参与聊天召回。",knowledge:"知识证据尚未达到门槛，不参与聊天召回。",correction:"纠错提案待核对，原记忆继续有效；确认时会再次检查原记录版本。"}[memory.hold_reason] || "待管理员核对，不参与聊天召回。","field-hint"));
     card.append(detailsFor(memory));
     const actions=node("div","","item-actions");
+    if (memory.status === "pending" && memory.hold_reason === "correction") {
+      actions.append(mutationButton("确认纠错", async()=>{
+        if (await ask({title:"确认纠错提案",description:memory.content,submit:"确认并替换原记忆"})) await perform(()=>action("memory_approve",{memory_id:memory.id,user_id:memory.user_id,revision:memory.revision}),"纠错已确认。");
+      }), mutationButton("拒绝纠错",()=>perform(()=>action("memory_reject",{memory_id:memory.id,user_id:memory.user_id,revision:memory.revision}),"纠错已拒绝。")));
+    }
     if (["active","pending","rejected"].includes(memory.status)) actions.append(mutationButton("编辑全部细节",()=>editMemoryDetails(memory)));
     actions.append(mutationButton("忘记", async()=>{
       if (await ask({title:"忘记记忆",description:memory.content,danger:true})) await perform(()=>action("memory_forget",{memory_id:memory.id,user_id:memory.user_id}),"记忆已遗忘。");

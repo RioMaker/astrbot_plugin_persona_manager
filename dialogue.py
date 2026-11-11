@@ -59,11 +59,21 @@ class DialogueStore:
                     (source_id, source_id),
                 )
 
-    def pending_learning(self, *, persona_id, limit=500, after=None):
+    def pending_learning(
+        self, *, persona_id, limit=500, after=None, scope_key=None, lane=None
+    ):
         sql = """SELECT s.*,q.lane AS learning_lane FROM learning_queue q
             JOIN sources s ON s.id=q.source_id WHERE q.status='pending' AND s.text<>''
             AND s.status NOT IN ('forgotten','expired','reviewed') AND s.persona_id=?"""
         args = [persona_id]
+        if scope_key is not None:
+            sql += " AND s.scope_key=?"
+            args.append(scope_key)
+        if lane is not None:
+            if lane not in {"interaction", "observation"}:
+                raise ValueError("学习队列类型无效")
+            sql += " AND q.lane=?"
+            args.append(lane)
         if after is not None:
             sql += " AND (s.sent_at>? OR (s.sent_at=? AND s.id>?))"
             args.extend((float(after[0]), float(after[0]), str(after[1])))

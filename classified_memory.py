@@ -132,10 +132,90 @@ class ClassifiedMemoryStore:
                 return True
         return False
 
+    def _model_correction_target(self, proposal, subject, owner):
+        target = proposal.get("corrects_id")
+        expected = proposal.get("expected_revision")
+        if type(target) is not int or type(expected) is not int:
+            return None
+        old = self.get_memory(target)
+        if (
+            not old
+            or old["status"] != "active"
+            or old["revision"] != expected
+            or old["persona_id"] != subject["persona_id"]
+            or old["user_id"] != owner
+            or old.get("admin_forced")
+            or (old.get("expires_at") is not None and old["expires_at"] <= self.clock())
+        ):
+            return None
+        scopes = (
+            {old["scope_key"]}
+            if old.get("scope_key")
+            else {
+                source["scope_key"]
+                for sid in old["source_ids"]
+                if (source := self.get_source(sid))
+            }
+        )
+        if scopes != {subject["scope_key"]}:
+            return None
+        return old
+
+    def _settle_classified_correction(self, mid):
+        """Retire the old record only after a verified correction becomes active."""
+        pending = self.get_meta(f"classified_correction:{mid}", None)
+        row = self.get_memory(mid)
+        if not pending or pending.get("applied"):
+            return True
+        if not row or row["status"] != "active":
+            return False
+        old = self._model_correction_target(
+            {
+                "corrects_id": row["corrects_id"],
+                "expected_revision": pending["revision"],
+            },
+            row,
+            row["user_id"],
+        )
+        if old is None or pending.get("needs_review"):
+            self.db.execute("UPDATE memories SET status='pending' WHERE id=?", (mid,))
+            self.db.execute(
+                "UPDATE memory_details SET hold_reason='correction' WHERE memory_id=?",
+                (mid,),
+            )
+            self.index_memory(mid)
+            return False
+        self.db.execute(
+            "UPDATE memories SET status='corrected' WHERE id=?", (old["id"],)
+        )
+        # Keep evidence available to administrators, but never learn it again.
+        retired_sources = set(old["source_ids"]) - set(row["source_ids"])
+        self.db.executemany(
+            "UPDATE sources SET status='reviewed' WHERE id=? AND status NOT IN ('forgotten','expired')",
+            ((sid,) for sid in retired_sources),
+        )
+        self.db.executemany(
+            "INSERT OR IGNORE INTO source_tombstones VALUES (?)",
+            ((sid,) for sid in retired_sources),
+        )
+        self.set_meta(f"classified_correction:{mid}", {**pending, "applied": True})
+        self.index_memory(old["id"])
+        return True
+
     def apply_memories(self, proposals, epoch):
         legacy = [p for p in proposals if isinstance(p, dict) and "class_id" not in p]
         classified = [p for p in proposals if isinstance(p, dict) and "class_id" in p]
         with self.transaction():
+            legacy = [
+                p
+                for p in legacy
+                if "corrects_id" not in p
+                or (
+                    p.get("source_ids")
+                    and (subject := self.get_source(p["source_ids"][0]))
+                    and self._model_correction_target(p, subject, subject["user_id"])
+                )
+            ]
             ids = super().apply_memories(legacy, epoch)
             for mid in ids:
                 row = self.get_memory(mid)
@@ -153,6 +233,20 @@ class ClassifiedMemoryStore:
                         604800,
                     ),
                 )
+                if row.get("corrects_id"):
+                    self.set_meta(
+                        f"classified_correction:{mid}",
+                        {
+                            "revision": row["revision"] - 1,
+                            "applied": row["status"] == "active",
+                            "needs_review": row["status"] == "pending",
+                        },
+                    )
+                    if row["status"] == "pending":
+                        self.db.execute(
+                            "UPDATE memory_details SET hold_reason='correction' WHERE memory_id=?",
+                            (mid,),
+                        )
             if classified:
                 ids.extend(self.apply_classified(classified, epoch))
             return ids
@@ -219,19 +313,24 @@ class ClassifiedMemoryStore:
                     if cat == "knowledge"
                     else subject["user_id"]
                 )
+                old = None
+                if "corrects_id" in proposal:
+                    old = self._model_correction_target(proposal, subject, owner)
+                    if old is None:
+                        continue
+                    proposal = {**proposal, "key": old["key"]}
                 newest = max(sources, key=lambda s: s["sent_at"])
-                fingerprint = hashlib.sha256(
-                    encode(
-                        [
-                            persona,
-                            owner,
-                            proposal["source_ids"],
-                            proposal["class_id"],
-                            proposal["key"],
-                            proposal["content"],
-                        ]
-                    ).encode()
-                ).hexdigest()
+                identity = [
+                    persona,
+                    owner,
+                    proposal["source_ids"],
+                    proposal["class_id"],
+                    proposal["key"],
+                    proposal["content"],
+                ]
+                if old:
+                    identity.append(old["id"])
+                fingerprint = hashlib.sha256(encode(identity).encode()).hexdigest()
                 claim = hashlib.sha256(
                     encode(
                         [
@@ -271,6 +370,8 @@ class ClassifiedMemoryStore:
                     if cls["status"] == "pending"
                     else "knowledge"
                     if cat == "knowledge" and count < knowledge_confirmations
+                    else "correction"
+                    if old and proposal["confidence"] < 0.8
                     else ""
                 )
                 cursor = self.db.execute(
@@ -295,6 +396,18 @@ class ClassifiedMemoryStore:
                 if not cursor.rowcount:
                     continue
                 mid = cursor.lastrowid
+                if old:
+                    self.db.execute(
+                        "UPDATE memories SET corrects_id=? WHERE id=?", (old["id"], mid)
+                    )
+                    self.set_meta(
+                        f"classified_correction:{mid}",
+                        {
+                            "revision": old["revision"],
+                            "applied": False,
+                            "needs_review": proposal["confidence"] < 0.8,
+                        },
+                    )
                 expires = (
                     newest["sent_at"] + proposal["ttl_seconds"]
                     if cat == "timed"
@@ -311,6 +424,11 @@ class ClassifiedMemoryStore:
                         encode(proposal["evidence"]),
                     ),
                 )
+                if old:
+                    self.db.execute(
+                        "UPDATE memory_traits SET revision=? WHERE memory_id=?",
+                        (old["revision"] + 1, mid),
+                    )
                 self.db.execute(
                     "INSERT INTO memory_details VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
                     (
@@ -353,7 +471,9 @@ class ClassifiedMemoryStore:
                             (old[0],),
                         )
                         self.index_memory(old[0])
-                if cat == "self" and not hold:
+                        self._settle_classified_correction(old[0])
+                settled = self._settle_classified_correction(mid)
+                if cat == "self" and not hold and settled:
                     self._refresh_self(mid)
                 self.index_memory(mid)
                 accepted.append(mid)
@@ -438,7 +558,7 @@ class ClassifiedMemoryStore:
         with self.transaction():
             self.set_meta("knowledge_threshold", threshold)
             changed = False
-            rows = self.db.execute("""SELECT m.id,m.status,d.claim_key FROM memories m JOIN memory_details d ON d.memory_id=m.id
+            rows = self.db.execute("""SELECT m.id,m.status,d.claim_key,d.hold_reason FROM memories m JOIN memory_details d ON d.memory_id=m.id
                 JOIN memory_classes c ON c.persona_id=m.persona_id AND c.id=d.class_id
                 WHERE c.category='knowledge' AND c.status='confirmed' AND d.admin_forced=0 AND m.status IN ('active','pending')""").fetchall()
             for row in rows:
@@ -447,6 +567,8 @@ class ClassifiedMemoryStore:
                     (row["claim_key"],),
                 ).fetchone()[0]
                 status = "active" if count >= threshold else "pending"
+                if status == "active" and row["hold_reason"] == "correction":
+                    continue
                 if status != row["status"]:
                     self.db.execute(
                         "UPDATE memories SET status=? WHERE id=?", (status, row["id"])
@@ -464,6 +586,8 @@ class ClassifiedMemoryStore:
                         (row["id"],),
                     )
                     self.index_memory(row["id"])
+                    if status == "active":
+                        self._settle_classified_correction(row["id"])
                     changed = True
             if changed:
                 self._bump_epoch()
@@ -574,7 +698,8 @@ class ClassifiedMemoryStore:
                     (definition["ttl_seconds"], hold, row["id"]),
                 )
                 self.index_memory(row["id"])
-                if cat == "self" and not hold:
+                settled = self._settle_classified_correction(row["id"])
+                if cat == "self" and not hold and settled:
                     self._refresh_self(row["id"])
             self.maintain_memories(cache_capacity=cache_capacity)
             self._bump_epoch()
@@ -710,7 +835,8 @@ class ClassifiedMemoryStore:
                     (claim, mid),
                 )
             self.index_memory(mid)
-            if cls["category"] == "self" and not hold:
+            settled = self._settle_classified_correction(mid)
+            if cls["category"] == "self" and not hold and settled:
                 self._refresh_self(mid)
             self.maintain_memories(cache_capacity=cache_capacity)
             self._bump_epoch()
@@ -748,6 +874,44 @@ class ClassifiedMemoryStore:
                 and row.get("hold_reason") in {"classification", "knowledge"}
             ):
                 raise ValueError("请先确认分类；知识需达到核实门槛或由管理员灌输")
+            pending = self.get_meta(f"classified_correction:{memory_id}", None)
+            if pending and not pending.get("applied") and action == "approve":
+                if (
+                    not row
+                    or row["status"] != "pending"
+                    or type(revision) is not int
+                    or row["revision"] != revision
+                ):
+                    raise ValueError("记忆已更新，请刷新后重试")
+                old = self._model_correction_target(
+                    {
+                        "corrects_id": row["corrects_id"],
+                        "expected_revision": pending["revision"],
+                    },
+                    row,
+                    row["user_id"],
+                )
+                if old is None:
+                    raise ValueError("被纠正的记忆已改变，不能批准旧提案")
+                self.set_meta(
+                    f"classified_correction:{memory_id}",
+                    {**pending, "needs_review": False},
+                )
+                self.db.execute(
+                    "UPDATE memories SET status='active' WHERE id=?", (memory_id,)
+                )
+                self.db.execute(
+                    "UPDATE memory_details SET hold_reason='' WHERE memory_id=?",
+                    (memory_id,),
+                )
+                self.db.execute(
+                    "UPDATE memory_traits SET revision=revision+1 WHERE memory_id=?",
+                    (memory_id,),
+                )
+                self._settle_classified_correction(memory_id)
+                self.index_memory(memory_id)
+                self._bump_epoch()
+                return
             return super().manage_memory(memory_id, action=action, revision=revision)
 
     def force_knowledge(self, persona_id, content, key, *, actor):

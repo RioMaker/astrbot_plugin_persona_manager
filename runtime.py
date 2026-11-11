@@ -200,17 +200,20 @@ class Runtime:
             return False
         return not self.closed and self.settings() == settings
 
-    async def run_once(self):
+    async def run_once(self, *, scope_key=None):
         # Reloads or manual ticks must not spend twice on the same pending batch.
         async with self._run_lock:
-            await self._run_once()
+            await self._run_once(scope_key=scope_key)
 
-    async def _run_once(self):
+    async def _run_once(self, *, scope_key=None):
         settings = self.settings()
         self.scheduler_status["groups"] = []
-        await self.db("maintain_memories", cache_capacity=settings.short_cache_capacity)
-        await self.db("reconcile_knowledge", settings.knowledge_confirmations)
-        if settings.enabled and settings.auto_dream:
+        if scope_key is None:
+            await self.db(
+                "maintain_memories", cache_capacity=settings.short_cache_capacity
+            )
+            await self.db("reconcile_knowledge", settings.knowledge_confirmations)
+        if scope_key is None and settings.enabled and settings.auto_dream:
             now_clock = datetime.fromtimestamp(time.time(), BEIJING)
             dream_at = now_clock.replace(
                 hour=settings.dream_hour, minute=0, second=0, microsecond=0
@@ -224,11 +227,12 @@ class Runtime:
                 )
             elif last < dream_at.timestamp():
                 await self.db("dream", settings.persona_id, cutoff=dream_at.timestamp())
-        await self.db(
-            "cleanup",
-            observation_hours=settings.observation_retention_hours,
-            interaction_days=settings.interaction_retention_days,
-        )
+        if scope_key is None:
+            await self.db(
+                "cleanup",
+                observation_hours=settings.observation_retention_hours,
+                interaction_days=settings.interaction_retention_days,
+            )
         if not settings.enabled or not settings.learning_enabled:
             self._schedule_status("disabled", "配置已关闭学习")
             return
@@ -240,20 +244,26 @@ class Runtime:
             "pending_learning",
             persona_id=settings.persona_id,
             limit=500,
-            after=self._scan_after,
+            after=self._scan_after if scope_key is None else None,
+            scope_key=scope_key,
+            lane="interaction" if scope_key is not None else None,
         )
-        if not rows and self._scan_after is not None:
+        if scope_key is None and not rows and self._scan_after is not None:
             self._scan_after = None
             rows = await self.db(
                 "pending_learning", persona_id=settings.persona_id, limit=500
             )
-        if rows:
+        if scope_key is None and rows:
             # Rotate through large queues: a disabled group cannot starve later ones.
             self._scan_after = (
                 (rows[-1]["sent_at"], rows[-1]["id"]) if len(rows) >= 500 else None
             )
         batches = defaultdict(list)
         for row in rows:
+            if scope_key is not None and (
+                row["scope_key"] != scope_key or row["purpose"] != "interaction"
+            ):
+                continue
             if not self._eligible(row, settings):
                 continue
             # Personal memory is processed per person; observational style per group.
@@ -569,6 +579,7 @@ class Runtime:
                         classes,
                         episodes,
                         event_salience_threshold=settings.event_salience_threshold,
+                        existing=existing,
                     )
                 async with self.lock:
                     if not await self._learning_allowed(selected, settings, epoch):

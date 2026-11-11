@@ -373,7 +373,10 @@ def test_main_hooks_retrieve_same_qq_across_groups_and_page_timeline(entry):
             )
             second_request = request()
             await env.plugin.on_request(second_event, second_request)
-            assert "以后回答简短" in second_request.extra_user_content_parts[-1].text
+            assert any(
+                part.text.startswith(CONTEXT_MARKER) and "以后回答简短" in part.text
+                for part in second_request.extra_user_content_parts
+            )
             env.request.query.update(user_id="123456")
             response = await route(env.context, "state")()
             assert response.status_code == 200
@@ -701,9 +704,14 @@ def test_actual_gate_then_persona_preserves_routing_and_private_zero_cost(
             if case == "chat":
                 assert event.get_extra("access_gate_original_text") == text
                 assert not event.call_llm and event.is_at_or_wake_command
-                assert (
-                    len(req.extra_user_content_parts) == 1
-                )  # No empty filler context.
+                assert len(req.extra_user_content_parts) == 2
+                assert req.extra_user_content_parts[-1].text.startswith(
+                    "<kokoko_memory_tools>"
+                )
+                assert not any(
+                    part.text.startswith(CONTEXT_MARKER)
+                    for part in req.extra_user_content_parts
+                )  # Routing is always present; empty memory filler is still absent.
                 event._has_send_oper = True
                 await env.plugin.after_sent(event)
                 assert (

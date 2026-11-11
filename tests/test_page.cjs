@@ -69,6 +69,22 @@ function page(options = {}) {
 
 const flush = () => new Promise((resolve) => setImmediate(resolve));
 
+test("classified correction review displays the hold and confirms its exact revision", async () => {
+  const ui = page(); await flush();
+  ui.view.memory_catalog = { total: 1, items: [{ id: 7, user_id: "123456", category: "relationship", status: "pending", hold_reason: "correction", revision: 3, key: "称呼", content: "称呼我小青" }] };
+  await vm.runInContext("loadState()", ui.sandbox);
+  const list = ui.elements.get("catalog-items");
+  assert.match(textOf(list), /纠错提案待核对，原记忆继续有效/);
+  assert.doesNotMatch(textOf(list), /知识证据尚未达到/);
+  const find = el => el.textContent === "确认纠错" ? el : el.children.map(find).find(Boolean);
+  const pending = find(list).handlers.click();
+  assert.equal(ui.posts.length, 0);
+  ui.elements.get("dialog-form").handlers.submit({ preventDefault() {} }); await pending;
+  assert.equal(ui.posts[0].payload.action, "memory_approve");
+  assert.equal(ui.posts[0].payload.memory_id, 7);
+  assert.equal(ui.posts[0].payload.revision, 3);
+});
+
 test("manual dream from settings requires confirmation and preserves the draft persona", async () => {
   const ui = page(); await flush();
   edit(ui, "persona_id", "未保存人格");

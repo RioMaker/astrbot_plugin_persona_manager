@@ -108,6 +108,8 @@ def build_memory_prompt(
         '输出严格 JSON 对象 {"proposals": [...]}，最多12条，无新增记忆时返回空数组。'
         "分类器由管理员控制，使用已有 class_id。没有合适分类时提交 new_class，仍必须归入七种属性之一。"
         "未知短期类可自动使用；未知长期类暂存待管理员确认。不要用现有分类绕过审核。"
+        "新增使用 operation=add；确有本批新证据纠正旧记忆时使用 operation=correct，"
+        "target 必须逐字复制已有记忆的 handle（如 m12:r3），保持原主题 key；不得猜测编号或改写别人的记忆。"
         '每项格式：{"class_id":"relationship","key":"称呼","content":"摘要",'
         '"subject_source_id":"本批中此人发言的id","evidence":[{"source_id":"id","quote":"逐字原话","role":"user或assistant"}],'
         '"provenance":"self_report/hearsay/inferred/self_reflection","confidence":0.8,'
@@ -155,7 +157,7 @@ def build_memory_prompt(
 
 
 def parse_memory_response(
-    sources, response, classes, episodes, *, event_salience_threshold=0.7
+    sources, response, classes, episodes, *, event_salience_threshold=0.7, existing=None
 ):
     if not isinstance(response, str) or len(response) > 32000:
         raise ValueError("记忆整理响应过长或格式无效")
@@ -180,7 +182,9 @@ def parse_memory_response(
     if len(data["proposals"]) > 12:
         raise ValueError("单批整理最多12条记忆，请减小批次")
     # Legacy model responses remain readable during rolling upgrades.
-    legacy = parse_learning_response("interaction", sources, response)
+    legacy = parse_learning_response(
+        "interaction", sources, response, existing=existing
+    )
     known = {c["id"]: c for c in classes}
     index = _source_index(sources)
     replies = {r["id"]: r.get("bot_sent_reply", "") for ep in episodes for r in ep}
@@ -189,6 +193,21 @@ def parse_memory_response(
         if not isinstance(item, dict) or "class_id" not in item:
             continue
         try:
+            correction = {}
+            operation = item.get("operation", "add")
+            if operation == "correct":
+                target = item.get("target")
+                match = re.fullmatch(r"m([1-9]\d*):r([1-9]\d*)", str(target))
+                if not match or not any(
+                    row.get("handle") == target for row in (existing or [])
+                ):
+                    continue
+                correction = {
+                    "corrects_id": int(match[1]),
+                    "expected_revision": int(match[2]),
+                }
+            elif operation != "add" or "target" in item:
+                continue
             class_id = text(item.get("class_id"), 64)
             cls = known.get(class_id)
             new_class = None
@@ -304,6 +323,7 @@ def parse_memory_response(
                     tags=labels,
                     details=details,
                     ttl_seconds=ttl,
+                    **correction,
                 )
             )
         except (ValueError, TypeError, KeyError):
