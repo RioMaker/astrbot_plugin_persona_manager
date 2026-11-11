@@ -69,6 +69,39 @@ function page(options = {}) {
 
 const flush = () => new Promise((resolve) => setImmediate(resolve));
 
+test("manual dream from settings requires confirmation and preserves the draft persona", async () => {
+  const ui = page(); await flush();
+  edit(ui, "persona_id", "未保存人格");
+  const auto = ui.elements.get("setting-auto_dream"); auto.checked = false; auto.handlers.change();
+  ui.elements.get("settings-nav-lifecycle").handlers.click();
+  const cancelled = ui.elements.get("settings-dream-now").handlers.click();
+  assert.equal(ui.elements.get("action-dialog").open, true);
+  assert.match(ui.elements.get("dialog-description").textContent, /人格「可可子」/);
+  assert.equal(ui.posts.length, 0);
+  ui.elements.get("dialog-cancel").handlers.click(); await cancelled;
+  assert.equal(ui.posts.length, 0);
+  const confirmed = ui.elements.get("settings-dream-now").handlers.click();
+  ui.view.last_dream = 1794355200;
+  ui.elements.get("dialog-form").handlers.submit({ preventDefault() {} }); await confirmed;
+  assert.equal(ui.posts.length, 1);
+  assert.equal(ui.posts[0].payload.action, "memory_dream");
+  assert.equal(ui.posts[0].payload.persona_id, "可可子");
+  assert.equal(ui.elements.get("setting-persona_id").value, "未保存人格");
+  assert.equal(ui.elements.get("setting-auto_dream").checked, false);
+  assert.match(ui.elements.get("config-dirty").textContent, /2 项未保存修改/);
+  assert.match(ui.elements.get("settings-dream-status").textContent, /最近入梦：2026/);
+  assert.equal(ui.elements.get("config-section-lifecycle").hidden, false);
+});
+
+test("unconfirmed manual dream does not report success or replace the last dream time", async () => {
+  const ui = page({ unconfirmed: true }); await flush();
+  const before = ui.elements.get("settings-dream-status").textContent;
+  const pending = ui.elements.get("settings-dream-now").handlers.click();
+  ui.elements.get("dialog-form").handlers.submit({ preventDefault() {} }); await pending;
+  assert.match(ui.elements.get("notice").textContent, /未确认保存/);
+  assert.equal(ui.elements.get("settings-dream-status").textContent, before);
+});
+
 test("memory setting sliders preserve drafts across sections and save numeric values", async () => {
   const ui = page(); await flush();
   ui.elements.get("settings-nav-lifecycle").handlers.click();

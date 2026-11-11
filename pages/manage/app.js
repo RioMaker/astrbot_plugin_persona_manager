@@ -344,6 +344,7 @@ function renderSettingsPreview() {
     (index < 3 ? short : long).append(card);
   });
   byId("settings-classifier-note").textContent = `${pending} 类长期待确认 · ${auto} 类短期已自动通过、待核对。修改分类会同步迁移该类已有缓存。`;
+  byId("settings-dream-status").textContent = `当前人格：${selectedPersona} · 最近入梦：${state.last_dream == null ? "尚无记录" : dateText(state.last_dream)}`;
   byId("settings-sharing-note").textContent = configControls.get("memory_default_enabled")?.checked
     ? "门禁放行 → 默认记录互动记忆 → 本群读取；开启“公共记忆”后，才可读取其他群的用户记忆与知识库。"
     : "门禁放行 → 仅所选群记录互动记忆 → 本群读取；公共记忆仍需逐群开启。";
@@ -547,6 +548,11 @@ function renderConfig({ replace = false } = {}) {
     head.append(node("span", `0${index + 1}`, "section-number"), title, node("p", layout.description, "muted small"));
     section.append(head);
     if (layout.id === "lifecycle") {
+      const dream = node("div", "", "settings-callout");
+      const dreamCopy = node("div"), dreamStatus = node("p"); dreamStatus.id = "settings-dream-status";
+      dreamCopy.append(node("strong", "手动入梦"), dreamStatus, node("p", "立即清理日常记忆；关闭定时入梦时也可使用，不会提交未保存的设置。"));
+      const dreamButton = mutationButton("立即入梦", requestDream, { danger: true }); dreamButton.id = "settings-dream-now";
+      dream.append(dreamCopy, dreamButton); section.append(dream);
       const types = node("div", "", "memory-types");
       for (const [id, label, caption] of [["short", "短期记忆", "有边界地留存"], ["long", "长期记忆", "按证据与确认留存"]]) {
         const lane = node("div", "", "memory-lane"), list = node("div", "", "memory-type-grid"); list.id = `settings-${id}-types`;
@@ -1093,9 +1099,14 @@ byId("catalog-form").addEventListener("submit",async(event)=>{
 byId("catalog-owner-type").addEventListener("change",()=>{byId("catalog-user-field").hidden=byId("catalog-owner-type").value !== "person";});
 byId("catalog-prev").addEventListener("click",()=>perform(async()=>{catalogOffset=Math.max(0,catalogOffset-100);await loadState();}));
 byId("catalog-next").addEventListener("click",()=>perform(async()=>{if(catalogOffset+100 < Number(state.memory_catalog?.total || 0))catalogOffset+=100;await loadState();}));
-byId("dream-now").addEventListener("click",async()=>{
-  if(await ask({title:"现在入梦",description:"清理当前人格所有日常记忆；时效、缓存和长期记忆继续按各自规则保留。",submit:"入梦并清理"})) await perform(()=>action("memory_dream"),"已入梦，日常记忆已清理。");
-});
+async function requestDream() {
+  if (busy || !ready || dialogRequest) return;
+  const persona = selectedPersona;
+  if (await ask({ title: "立即入梦", description: `清理人格「${persona}」下所有群、所有用户的日常记忆，清理后无法从页面恢复。时效、缓存和长期记忆按各自规则保留。此操作不会保存配置草稿。`, submit: "入梦并清理", danger: true })) {
+    await perform(() => action("memory_dream", { persona_id: persona }), "已入梦，日常记忆已清理。");
+  }
+}
+byId("dream-now").addEventListener("click", requestDream);
 byId("knowledge-form").addEventListener("submit",async(event)=>{
   event.preventDefault();
   await perform(async()=>{await action("knowledge_force",{key:byId("knowledge-key").value,content:byId("knowledge-content").value});byId("knowledge-key").value="";byId("knowledge-content").value="";},"管理员确认的知识已录入。");
