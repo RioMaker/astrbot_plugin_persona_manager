@@ -2,7 +2,7 @@ name: astrbot_plugin_persona_manager
 display_name: 可可子人格管理
 short_desc: 七类记忆整理、分类审核、可控公共记忆与情境表达学习。
 desc: QQ 群专用人格管理；固定核心，全历史记忆检索、条件化表达经验、实际发送反馈、候选审核与内容回滚，保留门禁和后台 token 预算。
-version: "2.0.0"
+version: "2.1.0"
 author: Rio
 repo: ""
 astrbot_version: ">=4.24.0,<5"

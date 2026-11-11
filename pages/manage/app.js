@@ -19,6 +19,9 @@ let editingClassifier = null;
 let editingMemory = null;
 let catalogFilter = {};
 const configControls = new Map();
+const configSliders = new Map();
+const settingsPanels = new Map();
+let selectedSettingsPanel = "rhythm";
 
 const array = (value) => (Array.isArray(value) ? value : []);
 const object = (value) => (value && typeof value === "object" && !Array.isArray(value) ? value : {});
@@ -234,8 +237,127 @@ function renderCoreDirty() {
   byId("core-dirty").textContent = `${length.toLocaleString("zh-CN")} 字 · ${coreDirty ? "有未保存修改" : "已与当前版本同步"}`;
 }
 
-const sectionNames = { general: "基础与群范围", basic: "基础与群范围", scope: "基础与群范围", learning: "学习与采样", budget: "Token 预算", tokens: "Token 预算", schedule: "分时学习", evolution: "进化方向", direction: "进化方向", retention: "保留与高级", advanced: "保留与高级" };
+const settingsLayout = [
+  { id: "rhythm", title: "整理节奏", caption: "什么时候开始思考", description: "按群积累已回复的对话，达到门槛后批量整理；仍受时段、间隔与预算约束。", fields: ["enabled", "learning_enabled", "persona_id", "memory_enabled", "memory_batch_threshold", "batch_size", "thinking_notice"] },
+  { id: "lifecycle", title: "记忆生命周期", caption: "七类记忆如何留存", description: "短期按时间、入梦或容量清理；长期保留来源、证据与审核状态。", fields: ["short_cache_capacity", "auto_dream", "dream_hour", "knowledge_confirmations", "event_salience_threshold"] },
+  { id: "budget", title: "模型与预算", caption: "模型选择与用量上限", description: "记忆整理按输入与输出合计记账。1 Mtokens = 100 万 tokens；任一相关限额为 0 时停止模型整理。", fields: ["memory_daily_mtokens", "memory_monthly_mtokens", "learning_provider_id", "model_timeout_seconds", "max_output_tokens", "daily_calls", "daily_group_calls", "daily_token_limit", "daily_group_token_limit"] },
+  { id: "groups", title: "群与共享", caption: "哪些群可以学习、读取", description: "门禁负责放行；此处控制记忆与表达权限。每位用户统一存储记忆，各群是否读取公共记忆单独设置。", fields: ["memory_default_enabled", "observation_groups", "memory_groups", "memory_disabled_groups", "public_memory_groups", "global_style_groups", "group_tags", "ignored_qq"] },
+  { id: "expression", title: "表达与方向", caption: "怎么回忆、怎样表达", description: "调整聊天时的记忆与表达用量，设置成长方向；固定核心人设仍单独管理。", fields: ["evolution_guidance", "expression_per_turn", "expression_cooldown_seconds", "memory_context_chars", "expression_context_chars"] },
+  { id: "advanced", title: "高级选项", caption: "学习时段与原文保留", description: "旁听积累、学习时段、原文长度与保留时间。互动记忆的数量门槛在“整理节奏”中设置。", fields: ["price_aware_learning", "learning_windows", "cheap_learning_windows", "min_observation_batch", "cheap_observation_batch", "learning_interval_seconds", "cheap_learning_interval_seconds", "max_learning_wait_seconds", "max_source_chars", "max_batch_chars", "max_context_chars", "observation_retention_hours", "interaction_retention_days", "regular_interaction_batch", "cheap_interaction_batch"] },
+];
+const settingsRanges = {
+  memory_batch_threshold: [1, 60, 1, "条"], short_cache_capacity: [1, 1000, 1, "条 / 用户"],
+  knowledge_confirmations: [2, 20, 1, "次独立核实"], event_salience_threshold: [0, 1, 0.01, "情绪强度"],
+  dream_hour: [0, 23, 1, "时 · 北京时间"],
+};
+const settingsUnits = { memory_daily_mtokens: "Mtokens / 日", memory_monthly_mtokens: "Mtokens / 月", batch_size: "条 / 批" };
 const optionNames = { immediate: "积累够样本即学习", adaptive: "自动判断", windows: "仅指定时段", hybrid: "组合策略" };
+
+function settingsPanelFor(name) {
+  return settingsLayout.find((panel) => panel.fields.includes(name))?.id || "advanced";
+}
+
+function selectSettingsPanel(id) {
+  selectedSettingsPanel = settingsPanels.has(id) ? id : "rhythm";
+  for (const [key, panel] of settingsPanels) {
+    const active = key === selectedSettingsPanel;
+    panel.section.hidden = !active;
+    panel.button.classList.toggle("active", active);
+    if (active) panel.button.setAttribute("aria-current", "true");
+    else panel.button.removeAttribute("aria-current");
+  }
+}
+
+function draftNumber(name) {
+  const value = configControls.get(name)?.value;
+  if (value === undefined || !String(value).trim()) return null;
+  const number = Number(value), schema = configSchema[name] || {};
+  if (!Number.isFinite(number) || number < (schema.minimum ?? settingsRanges[name]?.[0] ?? 0) || number > (schema.maximum ?? settingsRanges[name]?.[1] ?? Infinity) || (schema.type === "int" && !Number.isInteger(number))) return null;
+  return number;
+}
+
+function draftDisplay(name, suffix = "") {
+  const value = draftNumber(name);
+  return value === null ? "待填写有效值" : `${value}${suffix}`;
+}
+
+function renderSettingsBudget() {
+  const target = byId("settings-budget-preview");
+  target.replaceChildren();
+  for (const [period, label, field] of [["daily", "今日整理用量", "memory_daily_mtokens"], ["monthly", "本月整理用量", "memory_monthly_mtokens"]]) {
+    const rawUsed = state?.memory_usage?.[period]?.mtokens;
+    const used = typeof rawUsed === "number" && Number.isFinite(rawUsed) && rawUsed >= 0 ? rawUsed : null;
+    const limit = draftNumber(field), ratio = used !== null && limit > 0 ? Math.min(100, used / limit * 100) : 0;
+    const exhausted = used !== null && limit > 0 && used >= limit;
+    const card = node("article", "", `budget-preview-card${exhausted || limit === 0 ? " budget-limited" : ""}`);
+    card.id = `settings-budget-${period}`;
+    card.append(node("span", label, "metric-label"), node("strong", used === null ? "—" : used.toFixed(6), "budget-number"), node("span", ` / ${limit ?? "待填写"} Mtokens`, "muted small"));
+    const track = node("div", "", "budget-track");
+    track.setAttribute("role", "progressbar"); track.setAttribute("aria-label", label);
+    track.setAttribute("aria-valuemin", "0"); track.setAttribute("aria-valuemax", "100");
+    if (used !== null && limit > 0) track.setAttribute("aria-valuenow", String(Math.round(ratio)));
+    const fill = node("div", "", "budget-fill"); fill.style.width = `${ratio}%`; track.append(fill);
+    const note = limit === null ? "请填写有效限额" : limit === 0 ? "限额为 0 · 模型整理停用" : used === null ? "暂未取得用量数据" : exhausted ? "已达到此限额" : `剩余 ${(limit - used).toFixed(6)} Mtokens`;
+    track.setAttribute("aria-valuetext", note);
+    card.append(track, node("p", note, "small")); target.append(card);
+  }
+}
+
+function renderSettingsPreview() {
+  if (!configControls.size) return;
+  byId("settings-preview-state").textContent = configDirty ? "草稿预览 · 尚未生效" : "已保存配置";
+  const flow = byId("settings-flow"); flow.replaceChildren();
+  const pending = array(state?.classifiers).filter((cls) => cls.status === "pending").length;
+  const auto = array(state?.classifiers).filter((cls) => cls.status === "auto").length;
+  const steps = [
+    ["01", "积累对话", draftDisplay("memory_batch_threshold", " 条后整理"), "每群独立积累", "rhythm"],
+    ["02", "思考整理", "批量提炼记忆", configControls.get("thinking_notice")?.checked ? "开启来源群思考提示" : "仅控制台显示思考状态", "rhythm"],
+    ["03", "按属性留存", "3 类短期 · 4 类长期", "到期、入梦、容量淘汰", "lifecycle"],
+    ["04", "确认新分类", pending ? `${pending} 类长期待确认` : "长期确认后使用", `短期自动通过 · ${auto} 类待核对`, "archive"],
+  ];
+  for (const [index, label, value, hint, destination] of steps) {
+    const step = node("button", "", "memory-flow-step"); step.type = "button";
+    step.append(node("span", `${index} / ${label}`, "flow-label"), node("strong", value), node("span", hint, "small muted"));
+    step.addEventListener("click", () => destination === "archive" ? showPanel("archive") : selectSettingsPanel(destination));
+    flow.append(step);
+  }
+  const off = ["enabled", "learning_enabled", "memory_enabled"].some((name) => configControls.get(name)?.checked === false);
+  byId("settings-flow-note").textContent = off ? "当前草稿已关闭记忆整理相关开关；保存后不再进行模型记忆整理。" : paused() ? "运行中的学习已暂停，可通过页面顶部“恢复学习”继续。参数预览仍可编辑。" : "点击流程卡片跳转设置；时段、间隔和预算共同决定实际执行时间。";
+  const daily = configControls.get("auto_dream")?.checked;
+  const hour = draftNumber("dream_hour");
+  const dream = daily ? hour === null ? "入梦时间待填写" : `每日 ${String(hour).padStart(2, "0")}:00 入梦清理` : "下次手动入梦时清理";
+  const cards = [
+    ["timed", "时效性记忆", "各条记忆独立计时", "如 5 分钟、30 分钟；到期即停止召回。默认时长在分类器中调整。"],
+    ["daily", "日常记忆", dream, "保留到下一次入梦，按北京时间执行。关闭自动入梦后仍可手动入梦。"],
+    ["cache", "缓存短期记忆", draftDisplay("short_cache_capacity", " 条 / 用户"), "容量满后先移除最旧一条；跨群合计容量，读取仍受群权限约束。"],
+    ["relationship", "关系记忆", "来源与准确性分开记录", "主观关系、称呼、人物信息、对我说过的话和当时心情。"],
+    ["event", "事件记忆", `情绪强度 ≥ ${draftDisplay("event_salience_threshold")}`, "需要实际回复证据与明确心情，保留情绪波动显著的经历。"],
+    ["knowledge", "知识记忆", `${draftDisplay("knowledge_confirmations")} 次独立核实`, "证据不足先暂存；管理员确认可直接录入，重复引用不增加次数。"],
+    ["self", "自我认知", "按独立特性更新", "从实际言语行为提炼自我认识，保留旧版本，不改写核心身份。"],
+  ];
+  const short = byId("settings-short-types"), long = byId("settings-long-types");
+  short.replaceChildren(); long.replaceChildren();
+  cards.forEach(([category, title, value, description], index) => {
+    const card = node("article", "", `memory-type-card ${index < 3 ? "short-type" : "long-type"}`);
+    card.id = `settings-type-${category}`;
+    card.append(node("h4", title), node("strong", value), node("p", description));
+    (index < 3 ? short : long).append(card);
+  });
+  byId("settings-classifier-note").textContent = `${pending} 类长期待确认 · ${auto} 类短期已自动通过、待核对。修改分类会同步迁移该类已有缓存。`;
+  byId("settings-sharing-note").textContent = configControls.get("memory_default_enabled")?.checked
+    ? "门禁放行 → 默认记录互动记忆 → 本群读取；开启“公共记忆”后，才可读取其他群的用户记忆与知识库。"
+    : "门禁放行 → 仅所选群记录互动记忆 → 本群读取；公共记忆仍需逐群开启。";
+  for (const [name, slider] of configSliders) {
+    const value = draftNumber(name);
+    if (value !== null) slider.value = String(value);
+  }
+  for (const [id, panel] of settingsPanels) {
+    const changed = [...configControls].filter(([name, control]) => settingsPanelFor(name) === id && (configSchema[name].type === "bool" ? control.checked !== configBase[name] : control.value !== configValueText(configBase[name], configSchema[name]))).length;
+    panel.badge.textContent = changed ? `${changed} 项修改` : "";
+    panel.badge.hidden = !changed;
+  }
+  renderSettingsBudget();
+}
 
 function configValueText(value, schema) {
   return schema.type === "list" ? array(value).join("\n") : string(value);
@@ -253,6 +375,7 @@ function updateConfigDirty({ renderGroups = true } = {}) {
   byId("config-conflict").hidden = !configConflict;
   byId("settings-tab-dot").hidden = !configDirty;
   if (renderGroups) renderGroupPicker();
+  renderSettingsPreview();
   setAvailability();
 }
 
@@ -406,22 +529,67 @@ function renderConfig({ replace = false } = {}) {
   configConflict = false;
   configDirty = false;
   configControls.clear();
+  configSliders.clear();
+  settingsPanels.clear();
+  const groupPicker = byId("settings-group-picker");
   const target = byId("settings-sections");
   target.replaceChildren();
+  const nav = byId("settings-nav");
+  nav.replaceChildren();
   const sections = new Map();
-  const sectionCards = new Map();
+  const extraFields = new Map();
+  for (const [index, layout] of settingsLayout.entries()) {
+    const section = node("section", "", "card settings-section");
+    section.id = `config-section-${layout.id}`;
+    section.setAttribute("aria-labelledby", `config-title-${layout.id}`);
+    const title = node("h3", layout.title); title.id = `config-title-${layout.id}`;
+    const head = node("div", "", "settings-section-head");
+    head.append(node("span", `0${index + 1}`, "section-number"), title, node("p", layout.description, "muted small"));
+    section.append(head);
+    if (layout.id === "lifecycle") {
+      const types = node("div", "", "memory-types");
+      for (const [id, label, caption] of [["short", "短期记忆", "有边界地留存"], ["long", "长期记忆", "按证据与确认留存"]]) {
+        const lane = node("div", "", "memory-lane"), list = node("div", "", "memory-type-grid"); list.id = `settings-${id}-types`;
+        const heading = node("div", "", "memory-lane-heading"); heading.append(node("h4", label), node("span", caption, "muted small"));
+        lane.append(heading, list); types.append(lane);
+      }
+      const review = node("div", "", "settings-callout");
+      const note = node("p"); note.id = "settings-classifier-note";
+      const button = node("button", "管理分类与有效期 →"); button.type = "button"; button.addEventListener("click", () => showPanel("archive"));
+      review.append(note, button);
+      section.append(types, review, node("h4", "调整留存与确认规则", "settings-subtitle"));
+    }
+    if (layout.id === "budget") {
+      const preview = node("div", "", "settings-budget-preview"); preview.id = "settings-budget-preview";
+      section.append(preview, node("p", "用量包含在途预留与未知用量估算；下方限额采用当前草稿。每日 / 每月按北京时间重置。", "muted small"));
+    }
+    if (layout.id === "groups") {
+      const note = node("p", "", "sharing-route"); note.id = "settings-sharing-note";
+      section.append(note);
+    }
+    const fields = node("div", "", "settings-fields");
+    sections.set(layout.id, fields); section.append(fields);
+    if (layout.id === "groups") { groupPicker.hidden = false; section.append(groupPicker); }
+    if (["budget", "groups", "advanced"].includes(layout.id)) {
+      const details = node("details", "", "settings-extra"); details.id = `settings-extra-${layout.id}`;
+      const labels = { budget: "共同生效的调用次数与单群预算", groups: "高级：手动群范围与排除用户", advanced: "旧版兼容参数" };
+      const description = { budget: "以下上限由旁听与互动整理共用。记忆日/月预算有剩余时，也可能因这些上限暂停。", groups: "与上方群开关同步。可手动添加尚未发现的群，未知群号不会因筛选而丢失。", advanced: "保留旧版配置兼容；当前互动整理使用“整理节奏”中的数量门槛，这两项不再控制它。" };
+      const extra = node("div", "", "settings-fields");
+      details.append(node("summary", labels[layout.id]), node("p", description[layout.id], "muted small"), extra);
+      extraFields.set(layout.id, extra); section.append(details);
+    }
+    const button = node("button", "", "settings-nav-button"); button.type = "button";
+    button.id = `settings-nav-${layout.id}`; button.setAttribute("aria-controls", section.id);
+    const copy = node("span", "", "settings-nav-copy"), badge = node("span", "", "settings-nav-badge");
+    copy.append(node("strong", layout.title), node("small", layout.caption));
+    button.append(node("span", `0${index + 1}`, "settings-nav-number"), copy, badge);
+    button.addEventListener("click", () => selectSettingsPanel(layout.id));
+    nav.append(button); target.append(section);
+    settingsPanels.set(layout.id, { section, button, badge });
+  }
+  const fieldsByName = new Map();
   for (const [name, schemaValue] of Object.entries(configSchema)) {
     const schema = object(schemaValue);
-    const sectionKey = schema.section || "advanced";
-    if (!sections.has(sectionKey)) {
-      const section = node("section", "", "card settings-section");
-      const title = node("h3", sectionNames[sectionKey] || sectionKey);
-      const fields = node("div", "", "settings-fields");
-      section.append(title, fields);
-      sections.set(sectionKey, fields);
-      sectionCards.set(sectionKey, section);
-      target.append(section);
-    }
     const field = node("div", "", `field config-field${schema.type === "list" || name === "evolution_guidance" ? " wide-field" : ""}`);
     const label = node("label", schema.description || name);
     label.htmlFor = `setting-${name}`;
@@ -475,9 +643,25 @@ function renderConfig({ replace = false } = {}) {
     control.id = `setting-${name}`;
     control.name = name;
     control.autocomplete = "off";
+    if (schema.type === "bool") control.setAttribute("role", "switch");
     control.addEventListener(schema.type === "bool" || control.tagName === "SELECT" ? "change" : "input", updateConfigDirty);
-    field.append(label, control);
-    if (schema.hint) field.append(node("p", schema.hint, "field-hint"));
+    field.append(label);
+    const unit = settingsRanges[name]?.[3] || settingsUnits[name];
+    if (unit) {
+      const wrapper = node("div", "", "number-with-unit"); wrapper.append(control, node("span", unit)); field.append(wrapper);
+    } else field.append(control);
+    if (settingsRanges[name]) {
+      const [min, max, step] = settingsRanges[name];
+      const slider = node("input"); slider.type = "range"; slider.id = `range-${name}`; slider.className = "config-range";
+      slider.min = schema.minimum ?? min; slider.max = schema.maximum ?? max; slider.step = step; slider.value = control.value;
+      slider.setAttribute("aria-label", `${schema.description || name}（滑动调节）`);
+      slider.addEventListener("input", () => { control.value = slider.value; updateConfigDirty({ renderGroups: false }); });
+      configSliders.set(name, slider); field.append(slider);
+    }
+    if (schema.hint) {
+      const hint = node("p", schema.hint, "field-hint"); hint.id = `hint-${name}`;
+      control.setAttribute("aria-describedby", hint.id); field.append(hint);
+    }
     if (name === "evolution_guidance") {
       const example = mutationButton("载入参考方向", async () => {
         if (control.value.trim() && !await ask({ title: "载入参考方向", description: "将替换编辑框里的内容，保存设置后才生效。", submit: "替换草稿" })) return;
@@ -488,26 +672,28 @@ function renderConfig({ replace = false } = {}) {
       field.append(node("p", "方向引导学习取舍与表达，不自动改写固定人设，不增加工具能力。", "field-hint"), example);
     }
     configControls.set(name, control);
-    if (["observation_groups", "memory_groups", "memory_disabled_groups", "global_style_groups", "group_tags", "public_memory_groups"].includes(name)) {
-      const advanced = node("details", "", "wide-field group-advanced");
-      advanced.append(node("summary", `高级：${schema.description}（与群开关同步）`), field);
-      sections.get(sectionKey).append(advanced);
-    } else sections.get(sectionKey).append(field);
+    fieldsByName.set(name, field);
   }
-  const order = ["基础与范围", "基础与群范围", "general", "basic", "scope", "进化方向", "evolution", "direction", "Token 预算", "budget", "tokens", "价格时段与积累", "schedule", "学习与模型", "learning", "保留与高级", "retention", "advanced"];
-  const keys = [...sectionCards.keys()].sort((a, b) => (order.indexOf(a) < 0 ? 99 : order.indexOf(a)) - (order.indexOf(b) < 0 ? 99 : order.indexOf(b)));
-  target.replaceChildren(...keys.map((key) => sectionCards.get(key)));
-  const nav = byId("settings-nav");
-  nav.replaceChildren();
-  keys.forEach((key, index) => {
-    const section = sectionCards.get(key);
-    section.id = `config-section-${index}`;
-    const link = node("a", sectionNames[key] || key);
-    link.href = `#${section.id}`;
-    nav.append(link);
-  });
+  const folded = new Set(["daily_calls", "daily_group_calls", "daily_token_limit", "daily_group_token_limit", "observation_groups", "memory_groups", "memory_disabled_groups", "global_style_groups", "group_tags", "public_memory_groups", "ignored_qq", "regular_interaction_batch", "cheap_interaction_batch"]);
+  for (const name of [...settingsLayout.flatMap((panel) => panel.fields), ...fieldsByName.keys()]) {
+    const field = fieldsByName.get(name);
+    if (!field) continue;
+    const panel = settingsPanelFor(name);
+    (folded.has(name) ? extraFields.get(panel) : sections.get(panel)).append(field);
+    fieldsByName.delete(name);
+  }
+  selectSettingsPanel(selectedSettingsPanel);
   byId("settings-count").textContent = `${configControls.size} 项设置`;
   updateConfigDirty();
+}
+
+function configInputError(name, message) {
+  selectSettingsPanel(settingsPanelFor(name));
+  const control = configControls.get(name);
+  const details = control?.closest?.("details");
+  if (details) details.open = true;
+  control?.focus();
+  return new Error(message);
 }
 
 function changedConfigValues() {
@@ -517,15 +703,15 @@ function changedConfigValues() {
     let value;
     if (schema.type === "bool") value = control.checked;
     else if (schema.type === "int") {
-      if (!/^-?\d+$/.test(control.value.trim())) throw new Error(`${schema.description || name}：请填写整数。`);
+      if (!/^-?\d+$/.test(control.value.trim())) throw configInputError(name, `${schema.description || name}：请填写整数。`);
       value = Number(control.value);
-      if (!Number.isSafeInteger(value) || (schema.minimum !== undefined && value < schema.minimum) || (schema.maximum !== undefined && value > schema.maximum)) throw new Error(`${schema.description || name}：超出允许范围 ${schema.minimum ?? "不限"}～${schema.maximum ?? "不限"}。`);
+      if (!Number.isSafeInteger(value) || (schema.minimum !== undefined && value < schema.minimum) || (schema.maximum !== undefined && value > schema.maximum)) throw configInputError(name, `${schema.description || name}：超出允许范围 ${schema.minimum ?? "不限"}～${schema.maximum ?? "不限"}。`);
     } else if (schema.type === "float") {
       value = Number(control.value);
-      if (!control.value.trim() || !Number.isFinite(value) || value < 0 || value > (schema.maximum ?? 10000)) throw new Error(`${schema.description}：请填写0～${schema.maximum ?? 10000}的数字。`);
+      if (!control.value.trim() || !Number.isFinite(value) || value < 0 || value > (schema.maximum ?? 10000)) throw configInputError(name, `${schema.description}：请填写0～${schema.maximum ?? 10000}的数字。`);
     } else if (schema.type === "list") value = [...new Set(control.value.split(/\r?\n/).map((item) => item.trim()).filter(Boolean))];
     else value = control.value.trim();
-    if (name === "evolution_guidance" && value.length > 4000) throw new Error("进化方向最多 4000 字。");
+    if (name === "evolution_guidance" && value.length > 4000) throw configInputError(name, "进化方向最多 4000 字。");
     if (JSON.stringify(value) !== JSON.stringify(configBase[name])) changes[name] = value;
   }
   return changes;
@@ -986,15 +1172,17 @@ async function forgetMemory(memory) {
   if (confirmed) await perform(() => action("memory_forget", { memory_id: recordId(memory) }), "已忘记这条记忆。");
 }
 
-document.querySelectorAll("[data-panel]").forEach((button) => {
-  button.addEventListener("click", () => {
-    document.querySelectorAll("[data-panel]").forEach((tab) => {
-      const active = tab === button;
-      tab.classList.toggle("active", active);
-      if (active) tab.setAttribute("aria-current", "page"); else tab.removeAttribute("aria-current");
-      byId(`panel-${tab.dataset.panel}`).hidden = !active;
-    });
+function showPanel(name) {
+  document.querySelectorAll("[data-panel]").forEach((tab) => {
+    const active = tab.dataset.panel === name;
+    tab.classList.toggle("active", active);
+    if (active) tab.setAttribute("aria-current", "page"); else tab.removeAttribute("aria-current");
+    byId(`panel-${tab.dataset.panel}`).hidden = !active;
   });
+}
+
+document.querySelectorAll("[data-panel]").forEach((button) => {
+  button.addEventListener("click", () => showPanel(button.dataset.panel));
 });
 
 byId("dialog-cancel").addEventListener("click", () => finishDialog(null));

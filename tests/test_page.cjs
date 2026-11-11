@@ -69,6 +69,65 @@ function page(options = {}) {
 
 const flush = () => new Promise((resolve) => setImmediate(resolve));
 
+test("memory setting sliders preserve drafts across sections and save numeric values", async () => {
+  const ui = page(); await flush();
+  ui.elements.get("settings-nav-lifecycle").handlers.click();
+  const slider = ui.elements.get("range-short_cache_capacity");
+  slider.value = "45"; slider.handlers.input();
+  assert.equal(ui.elements.get("setting-short_cache_capacity").value, "45");
+  assert.match(textOf(ui.elements.get("settings-type-cache")), /45 条 \/ 用户/);
+  ui.elements.get("settings-nav-budget").handlers.click();
+  await vm.runInContext("loadState()", ui.sandbox);
+  assert.equal(ui.elements.get("config-section-budget").hidden, false);
+  assert.equal(ui.elements.get("config-section-lifecycle").hidden, true);
+  assert.match(ui.elements.get("settings-preview-state").textContent, /尚未生效/);
+  assert.equal(ui.posts.length, 0);
+  await ui.elements.get("settings-form").handlers.submit({ preventDefault() {} });
+  assert.deepEqual(ui.posts[0].payload.values, { short_cache_capacity: 45 });
+  assert.equal(ui.elements.get("config-section-budget").hidden, false);
+});
+
+test("lifecycle previews follow numeric input and automatic dream drafts", async () => {
+  const ui = page(); await flush();
+  edit(ui, "memory_batch_threshold", "25");
+  assert.equal(ui.elements.get("range-memory_batch_threshold").value, "25");
+  assert.match(textOf(ui.elements.get("settings-flow")), /25 条后整理/);
+  edit(ui, "dream_hour", "6");
+  assert.match(textOf(ui.elements.get("settings-type-daily")), /06:00 入梦清理/);
+  const automatic = ui.elements.get("setting-auto_dream"); automatic.checked = false; automatic.handlers.change();
+  assert.match(textOf(ui.elements.get("settings-type-daily")), /下次手动入梦/);
+  edit(ui, "short_cache_capacity", "");
+  assert.match(textOf(ui.elements.get("settings-type-cache")), /待填写有效值/);
+  assert.doesNotMatch(textOf(ui.elements.get("settings-type-cache")), /0 条/);
+  assert.equal(ui.posts.length, 0);
+});
+
+test("budget preview distinguishes missing usage, exhausted quotas and zero limits", async () => {
+  const ui = page(); await flush();
+  assert.match(textOf(ui.elements.get("settings-budget-daily")), /暂未取得用量数据/);
+  ui.view.memory_usage = { daily: { mtokens: 0.03 }, monthly: { mtokens: 0 } };
+  await vm.runInContext("loadState()", ui.sandbox);
+  edit(ui, "memory_daily_mtokens", "0.02");
+  assert.match(textOf(ui.elements.get("settings-budget-daily")), /已达到此限额/);
+  assert.match(textOf(ui.elements.get("settings-budget-monthly")), /0.000000.*剩余 1.800000/);
+  edit(ui, "memory_daily_mtokens", "0");
+  assert.match(textOf(ui.elements.get("settings-budget-daily")), /模型整理停用/);
+  edit(ui, "memory_monthly_mtokens", "");
+  assert.match(textOf(ui.elements.get("settings-budget-monthly")), /请填写有效限额/);
+  assert.doesNotMatch(textOf(ui.elements.get("settings-budget-preview")), /NaN|Infinity/);
+});
+
+test("invalid values in another settings section reveal the field without posting", async () => {
+  const ui = page(); await flush();
+  edit(ui, "daily_calls", "oops");
+  ui.elements.get("settings-nav-lifecycle").handlers.click();
+  await ui.elements.get("settings-form").handlers.submit({ preventDefault() {} });
+  assert.equal(ui.elements.get("config-section-budget").hidden, false);
+  assert.match(ui.elements.get("notice").textContent, /请填写整数/);
+  assert.equal(ui.elements.get("setting-daily_calls").value, "oops");
+  assert.equal(ui.posts.length, 0);
+});
+
 test("memory classifier approval sends revision and migration definition", async () => {
   const ui=page(); await flush();
   const cls={id:"travel",name:"出行",category:"relationship",description:"出行认识",keywords:["旅行"],ttl_seconds:1800,status:"pending",revision:3};
