@@ -493,6 +493,69 @@ test("usage separates measured, estimated and reserved tokens and renders zero h
   assert.match(textOf(ui.elements.get("schedule-groups")), /样本 3 \/ 门槛 1/);
 });
 
+test("overview separates captured dialogue, pending extraction and stored memory without requiring a model call", async () => {
+  const ui = page(); await flush();
+  Object.assign(ui.view.status, {
+    runtime_version: "2.2.1", sources: 24, pending_interactions: 20, memories: 0, pending_memories: 2,
+    capture: { state: "captured", reason: "已采集群聊对话，等待整理", group_id: "234567", checked_at: 1794355200, last_seen_at: 1794355190, last_request_at: 1794355195 },
+  });
+  ui.view.schedule = { state: "budget", reason: "预计 20009 tokens，单次上限 20000 tokens", groups: [] };
+  await vm.runInContext("loadState()", ui.sandbox);
+  const detail = textOf(ui.elements.get("schedule-details"));
+  assert.match(detail, /运行版本：v2\.2\.1 \/ 页面 v2\.2\.1/);
+  assert.match(detail, /已采集原文：24/);
+  assert.match(detail, /待整理对话：20/);
+  assert.match(detail, /生效记忆：0/);
+  assert.match(detail, /待确认记忆：2/);
+  assert.match(detail, /最近采集检查：已采集群聊对话，等待整理/);
+  assert.match(detail, /采集检查群：234567/);
+  assert.match(detail, /采集检查时间：2026/);
+  assert.match(detail, /最近收到群消息：2026/);
+  assert.match(detail, /最近进入模型请求：2026/);
+  const recent = textOf(ui.elements.get("learning-recent"));
+  assert.match(recent, /没有调用记录不等于没有采集/);
+  assert.match(recent, /已采集 24 条原文，有 20 条对话待整理/);
+  assert.match(recent, /预计 20009 tokens，单次上限 20000 tokens/);
+  assert.doesNotMatch(recent, /尚未采集到原文/);
+});
+
+test("empty learning calls explain zero capture, paused and disabled learning with the latest gate reason", async () => {
+  const ui = page(); await flush();
+  Object.assign(ui.view.status, { sources: 0, pending_interactions: 0, memories: 0, pending_memories: 0, capture: { state: "blocked", reason: "门禁插件未在当前会话启用" } });
+  await vm.runInContext("loadState()", ui.sandbox);
+  assert.match(textOf(ui.elements.get("learning-recent")), /尚未采集到原文/);
+  assert.match(textOf(ui.elements.get("learning-recent")), /门禁插件未在当前会话启用/);
+  for (const [values, expected] of [
+    [{ paused: true }, /学习已暂停/],
+    [{ paused: false, learning_enabled: false }, /学习已关闭/],
+    [{ learning_enabled: true, enabled: false }, /插件已关闭/],
+  ]) {
+    Object.assign(ui.view.status, values);
+    await vm.runInContext("loadState()", ui.sandbox);
+    const recent = textOf(ui.elements.get("learning-recent"));
+    assert.match(recent, expected);
+    assert.doesNotMatch(recent, /尚未采集到原文；请让/);
+  }
+});
+
+test("legacy overview diagnostics remain unknown and translate active scheduler states", async () => {
+  const ui = page(); await flush();
+  const detail = textOf(ui.elements.get("schedule-details"));
+  assert.match(detail, /运行版本：未知 \/ 页面 v2\.2\.1/);
+  assert.match(detail, /已采集原文：—/);
+  assert.match(detail, /待整理对话：—/);
+  assert.match(detail, /待确认记忆：—/);
+  assert.match(detail, /暂无采集诊断/);
+  assert.match(textOf(ui.elements.get("learning-recent")), /采集数量暂未取得/);
+  assert.doesNotMatch(textOf(ui.elements.get("learning-recent")), /尚未采集到原文|已采集 0/);
+  for (const [state, label] of [["collecting", "积累对话"], ["thinking", "思考整理中"], ["missing_provider", "缺少学习模型"]]) {
+    ui.view.schedule = { state, groups: [{ state, group_id: "234567", purpose: "interaction" }] };
+    await vm.runInContext("loadState()", ui.sandbox);
+    assert.equal(ui.elements.get("schedule-status").textContent, label);
+    assert.match(textOf(ui.elements.get("schedule-groups")), new RegExp(label));
+  }
+});
+
 test("direction example only changes the local draft", async () => {
   const ui = page();
   await flush();

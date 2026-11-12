@@ -5,6 +5,7 @@ import copy
 import inspect
 import json
 import re
+import time
 from datetime import datetime
 from pathlib import Path
 
@@ -29,10 +30,12 @@ from .storage import Store
 from .temporal import BEIJING
 
 PLUGIN_NAME = "astrbot_plugin_persona_manager"
+PLUGIN_VERSION = "2.2.1"
 GATE_NAME = "astrbot_plugin_access_gate"
 PENDING_KEY = PLUGIN_NAME + ":interaction"
 SENT_KEY = PLUGIN_NAME + ":sent"
 TRACE_KEY = PLUGIN_NAME + ":learning_trace"
+NATIVE_REQUEST_KEY = PLUGIN_NAME + ":native_request"
 TOOL_CONTEXT_MARKER = "<kokoko_memory_tools>"
 MEMORY_TOOL_NAMES = {
     "persona_memory_search",
@@ -62,6 +65,11 @@ class PersonaManagerPlugin(Star):
             thinking_callback=self._thinking_notice,
         )
         self._debug = {}
+        self._capture = {
+            "state": "waiting_request",
+            "reason": "尚未收到可采集的群聊模型请求；请在门禁放行的群与目标人格对话。",
+            "checked_at": None,
+        }
         self.discovery = GroupDiscovery(self.runtime)
         for endpoint, method, handler in (
             ("state", "GET", self.page_state),
@@ -74,6 +82,15 @@ class PersonaManagerPlugin(Star):
 
     def settings(self):
         return Settings.read(self.config)
+
+    def _capture_status(self, event, state, reason):
+        """Dashboard-only metadata; never retain messages or tool arguments here."""
+        self._capture.update(
+            state=state,
+            reason=reason,
+            checked_at=time.time(),
+            group_id=str(event.get_group_id() or ""),
+        )
 
     async def _memory_tool(self, event, action, **kwargs):
         try:
@@ -221,6 +238,8 @@ class PersonaManagerPlugin(Star):
     async def discover_groups(self, event: AstrMessageEvent):
         """Before Access Gate: metadata only, never read chat bodies or wake the bot."""
         try:
+            if group_identity(event, self.settings()) is not None:
+                self._capture["last_seen_at"] = time.time()
             await self.discovery.observe(event)
         except Exception:
             logger.warning("[可可子人格] 群目录更新失败，继续原消息流程。")
@@ -241,6 +260,34 @@ class PersonaManagerPlugin(Star):
             return False
         return await SessionPluginManager.is_plugin_enabled_for_session(
             event.unified_msg_origin, GATE_NAME
+        )
+
+    def _uses_native_wake(self, event) -> bool:
+        if not self._gate_loaded(event):
+            return False
+        gate = next(
+            star.star_cls
+            for star in self.context.get_all_stars()
+            if getattr(star, "name", None) == GATE_NAME
+            and getattr(star, "activated", False)
+        )
+        return (
+            callable(getattr(gate, "_bool", None))
+            and not gate._bool("wake_enabled", True)
+            and getattr(event, "is_at_or_wake_command", False) is True
+            and not getattr(event, "call_llm", False)
+        )
+
+    def _memory_request_authorized(self, event, source) -> bool:
+        if event.get_extra("access_gate_original_text", None) is not None:
+            return True
+        pending = event.get_extra(PENDING_KEY, None)
+        return (
+            self._uses_native_wake(event)
+            and event.get_extra(NATIVE_REQUEST_KEY, None) == source["id"]
+            and isinstance(pending, dict)
+            and pending.get("id") == source["id"]
+            and pending.get("scope_key") == source["scope_key"]
         )
 
     async def _source_allowed(self, source) -> bool:
@@ -334,7 +381,9 @@ class PersonaManagerPlugin(Star):
             if not await self._gate_allowed(event) or not await self._selected(event):
                 return
             # An actual chat request will be recorded on its successful send hook.
-            if event.get_extra("access_gate_original_text", None) is not None:
+            if event.get_extra(
+                "access_gate_original_text", None
+            ) is not None or self._uses_native_wake(event):
                 return
             source = sample(event, settings, "observation")
             if source is not None:
@@ -347,24 +396,64 @@ class PersonaManagerPlugin(Star):
         settings = self.settings()
         if group_identity(event, settings) is None:
             return
-        # Gate's trusted event extra is set only for approved main-chat requests.
-        if event.get_extra("access_gate_original_text", None) is None:
+        self._capture["last_request_at"] = time.time()
+        cached_request = event.get_extra("provider_request", None)
+        native_request = event.get_extra("access_gate_original_text", None) is None
+        # With custom wake disabled, Access Gate checks access but intentionally
+        # leaves waking to AstrBot. Require the native awakened request itself.
+        if native_request and not (
+            self._uses_native_wake(event) and cached_request is req
+        ):
+            self._capture_status(
+                event,
+                "missing_gate_marker",
+                "模型请求未带门禁放行标记，未采集；请检查门禁插件及群聊唤醒路径。",
+            )
             return
         if getattr(event, "call_llm", False):
+            self._capture_status(
+                event,
+                "default_llm_suppressed",
+                "当前事件关闭了默认主聊天流程，不作为互动采集。",
+            )
             return
-        # collect_initial_request caches the default chat request itself, while
-        # explicit plugin requests are shallow-copied before invoking this hook.
-        # Presence alone cannot distinguish them: normal chat also has this key.
-        cached_request = event.get_extra("provider_request", None)
+        # collect_initial_request caches the default chat request itself. Newer
+        # framework versions copy explicit requests; commands are also excluded
+        # by sample(), and explicit call_llm requests are excluded above.
         if cached_request is not None and cached_request is not req:
+            self._capture_status(
+                event,
+                "auxiliary_request",
+                "当前为独立模型请求，未匹配原生主聊天，不作为互动采集。",
+            )
             return
         try:
-            if not await self._gate_allowed(event) or not await self._selected(
-                event, req
-            ):
+            if not await self._gate_allowed(event):
+                self._capture_status(
+                    event, "gate_blocked", "门禁插件未加载或未在当前会话启用，未采集。"
+                )
+                return
+            if not await self._selected(event, req):
+                self._capture_status(
+                    event,
+                    "persona_mismatch",
+                    "当前会话人格与插件配置的目标人格不一致，未采集。",
+                )
                 return
             source = sample(event, settings, "interaction")
             if source is None:
+                self._capture_status(
+                    event,
+                    "invalid_source",
+                    "消息缺少有效文本、消息编号或时间，或命中命令/敏感内容过滤，未采集。",
+                )
+                return
+            if native_request and not await self._source_allowed(source):
+                self._capture_status(
+                    event,
+                    "gate_blocked",
+                    "原生唤醒请求未通过群门禁或会话权限复核，未采集。",
+                )
                 return
             if (
                 settings.remembers(source["group_id"], source["platform_id"])
@@ -374,6 +463,19 @@ class PersonaManagerPlugin(Star):
                 )
             ):
                 event.set_extra(PENDING_KEY, source)
+                if native_request:
+                    event.set_extra(NATIVE_REQUEST_KEY, source["id"])
+                self._capture_status(
+                    event,
+                    "awaiting_delivery",
+                    "已识别群聊请求，等待框架确认回复已发送。",
+                )
+            else:
+                self._capture_status(
+                    event,
+                    "group_disabled",
+                    "当前群未开启互动记忆或旁听，未进入整理队列。",
+                )
             feedback_source = dict(
                 source,
                 purpose="interaction"
@@ -428,6 +530,11 @@ class PersonaManagerPlugin(Star):
                     TRACE_KEY, {**detail, "epoch": await self.runtime.db("epoch")}
                 )
         except Exception:
+            self._capture_status(
+                event,
+                "request_error",
+                "请求准备异常；请检查 AstrBot 日志中的人格管理提示。",
+            )
             logger.warning("[可可子人格] 上下文补充失败，继续原对话。")
 
     @filter.after_message_sent()
@@ -466,6 +573,11 @@ class PersonaManagerPlugin(Star):
             return
         try:
             if not await self._gate_allowed(event) or not await self._selected(event):
+                self._capture_status(
+                    event,
+                    "delivery_blocked",
+                    "回复发送后门禁或目标人格条件改变，未采集。",
+                )
                 return
             event.set_extra(SENT_KEY, True)
             trace = event.get_extra(TRACE_KEY, {})
@@ -478,7 +590,40 @@ class PersonaManagerPlugin(Star):
             await self.runtime.record_delivery(
                 source, reply, trace, epoch=trace.get("epoch")
             )
+            if not settings.learning_enabled or await self.runtime.paused():
+                self._capture_status(
+                    event, "paused", "学习已关闭或暂停；回复已发送，未采集对话。"
+                )
+            elif trace.get("epoch") is not None and trace[
+                "epoch"
+            ] != await self.runtime.db("epoch"):
+                self._capture_status(
+                    event, "changed", "回复期间配置或记忆版本改变，未采集本条对话。"
+                )
+            else:
+                stored = await self.runtime.db("get_source", source["id"])
+                if (
+                    stored
+                    and stored.get("text")
+                    and stored["status"] not in {"forgotten", "expired", "reviewed"}
+                ):
+                    self._capture_status(
+                        event,
+                        "stored",
+                        "对话已采集；待整理数量达到阈值后按时段和预算处理。",
+                    )
+                else:
+                    self._capture_status(
+                        event,
+                        "not_stored",
+                        "回复已发送，但来源未入队；请检查群记忆开关、会话权限和来源状态。",
+                    )
         except Exception:
+            self._capture_status(
+                event,
+                "delivery_error",
+                "回复已发送，但采集发生异常；请检查 AstrBot 日志中的人格管理提示。",
+            )
             logger.warning("[可可子人格] 相处记忆记录跳过，消息已按原流程发送。")
 
     def _page_persona(self, value=None) -> str:
@@ -638,7 +783,9 @@ class PersonaManagerPlugin(Star):
                         "get_meta", "last_dream:" + persona_id, None
                     ),
                     "status": {
-                        **await self.runtime.db("stats"),
+                        **await self.runtime.db("stats", persona_id),
+                        "runtime_version": PLUGIN_VERSION,
+                        "capture": dict(self._capture),
                         "paused": await self.runtime.paused(),
                         "enabled": self.settings().enabled,
                         "learning_enabled": self.settings().learning_enabled,

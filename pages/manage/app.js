@@ -757,7 +757,7 @@ async function saveSettings() {
 const counter = (value) => typeof value === "number" && Number.isFinite(value) && value >= 0 ? value : null;
 const countText = (value) => counter(value) === null ? "—" : value.toLocaleString("zh-CN");
 const jobNames = { success: "已完成", completed: "已完成", failed: "失败", error: "失败", cancelled: "已取消", discarded: "结果已作废", reserved: "已预留", running: "学习中", started: "学习中", pending: "待确认", released: "未调用", unknown: "用量待确认" };
-const scheduleNames = { idle: "等待样本", disabled: "已关闭", paused: "已暂停", learning: "学习中", running: "学习中", cooldown: "间隔等待", budget: "预算不足", budget_exhausted: "预算不足", outside_window: "允许时段外", waiting_samples: "积累样本", insufficient_samples: "积累样本", insufficient: "积累样本", cheap: "低价时段", regular: "常规时段", blocked: "权限受限", deferred: "暂缓学习", complete: "学习完成", completed: "学习完成", success: "学习完成", error: "检查失败", failed: "学习失败", cancelled: "已取消", discarded: "结果作废" };
+const scheduleNames = { idle: "等待样本", disabled: "已关闭", paused: "已暂停", learning: "学习中", running: "学习中", thinking: "思考整理中", collecting: "积累对话", missing_provider: "缺少学习模型", cooldown: "间隔等待", budget: "预算不足", budget_exhausted: "预算不足", outside_window: "允许时段外", waiting_samples: "积累样本", insufficient_samples: "积累样本", insufficient: "积累样本", cheap: "低价时段", regular: "常规时段", blocked: "权限受限", deferred: "暂缓学习", complete: "学习完成", completed: "学习完成", success: "学习完成", error: "检查失败", failed: "学习失败", cancelled: "已取消", discarded: "结果作废" };
 
 function renderOverview() {
   const usage = object(state?.usage);
@@ -797,10 +797,21 @@ function renderOverview() {
   byId("schedule-reason").textContent = string(first(schedule.reason, schedule.message, "后台尚未开始检查，或暂无可处理样本。"));
   const details = byId("schedule-details");
   details.replaceChildren();
+  const status = object(state.status);
+  const capture = object(status.capture);
+  addMeta(details, "运行版本", `${status.runtime_version ? `v${status.runtime_version}` : "未知"} / 页面 v2.2.1`);
+  addMeta(details, "已采集原文", countText(status.sources));
+  addMeta(details, "待整理对话", countText(status.pending_interactions));
+  addMeta(details, "生效记忆", countText(status.memories));
+  addMeta(details, "待确认记忆", countText(status.pending_memories));
   const phase = first(schedule.phase, schedule.price_period, schedule.price_band);
   addMeta(details, "当前价段", phase === "cheap" ? "低价" : phase ? "常规" : undefined);
-  addMeta(details, "待处理", first(schedule.pending_count, state.status?.pending_sources));
-  addMeta(details, "最近学习", state.status?.last_learning_at ? dateText(state.status.last_learning_at) : "暂无");
+  addMeta(details, "最近采集检查", capture.reason || "暂无采集诊断；请在来源群正常对话后刷新，旧版本需先重载插件。");
+  if (capture.group_id) addMeta(details, "采集检查群", capture.group_id);
+  if (capture.checked_at) addMeta(details, "采集检查时间", dateText(capture.checked_at));
+  if (capture.last_seen_at) addMeta(details, "最近收到群消息", dateText(capture.last_seen_at));
+  if (capture.last_request_at) addMeta(details, "最近进入模型请求", dateText(capture.last_request_at));
+  addMeta(details, "最近学习", status.last_learning_at ? dateText(status.last_learning_at) : "暂无");
   if (schedule.next_at || schedule.next_check_at) addMeta(details, "下次可处理", dateText(first(schedule.next_check_at, schedule.next_at)));
   const groups = byId("schedule-groups");
   groups.replaceChildren();
@@ -861,7 +872,26 @@ function renderUsageGroups(rows) {
 function renderRecentLearning(rows) {
   const target = byId("learning-recent");
   target.replaceChildren();
-  if (!rows.length) { target.append(node("p", "尚无学习记录。配置范围、预算与学习时段后，结果会显示在这里。", "empty")); return; }
+  if (!rows.length) {
+    const status = object(state.status);
+    const cfg = object(state.config?.values);
+    const capture = object(status.capture);
+    const sources = counter(status.sources);
+    const pending = counter(status.pending_interactions);
+    const explanation = ["没有调用记录不等于没有采集。"];
+    if (status.enabled === false || cfg.enabled === false) explanation.push("插件已关闭；开启后再检查群聊采集与整理。");
+    else if (status.learning_enabled === false || cfg.learning_enabled === false) explanation.push("学习已关闭；开启后才会继续整理记忆。");
+    else if (status.paused) explanation.push("学习已暂停；恢复后再检查待整理对话。");
+    else if (cfg.memory_enabled === false) explanation.push("记忆系统已关闭，相处记忆不会自动整理。");
+    else if (pending > 0) explanation.push(`${sources === null ? "" : `已采集 ${countText(sources)} 条原文，`}有 ${countText(pending)} 条对话待整理；满足门槛、时段、间隔和预算后才会调用模型。`);
+    else if (sources === 0) explanation.push("尚未采集到原文；请让可可子在门禁放行的群里正常回复一条消息，再刷新查看采集状态。");
+    else if (sources > 0) explanation.push(`已采集 ${countText(sources)} 条原文${pending === 0 ? "，当前没有待整理的相处对话" : "，待整理数量暂未取得"}。`);
+    else explanation.push("采集数量暂未取得；后台开始模型整理后才会生成调用记录。");
+    if (capture.reason) explanation.push(`最近采集检查：${capture.reason}`);
+    if (state.schedule?.reason) explanation.push(`当前整理检查：${state.schedule.reason}`);
+    target.append(node("p", explanation.join(" "), "empty"));
+    return;
+  }
   for (const job of rows.slice(0, 20)) {
     const row = node("article", "", "learning-row");
     const title = node("div", "", "item-header");

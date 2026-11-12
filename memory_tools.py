@@ -102,7 +102,7 @@ class MemoryTools:
         source = sample(event, settings, "interaction")
         if (
             source is None
-            or event.get_extra("access_gate_original_text", None) is None
+            or not self.plugin._memory_request_authorized(event, source)
             or not settings.remembers(source["group_id"], source["platform_id"])
             or not await self.plugin._gate_allowed(event)
             or not await self.plugin._selected(event)

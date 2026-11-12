@@ -350,16 +350,26 @@ class DialogueStore:
             )
             return count
 
-    def stats(self):
+    def stats(self, persona_id=None):
         with self._lock:
+            where = " AND s.persona_id=?" if persona_id is not None else ""
+            args = (persona_id,) if persona_id is not None else ()
             return {
-                **super().stats(),
+                **super().stats(persona_id),
                 "schema_version": 1,
                 "dialogue_turns": self.db.execute(
                     "SELECT count(*) FROM dialogue_turns"
                 ).fetchone()[0],
                 "learning_jobs": self.db.execute(
                     "SELECT count(*) FROM learning_queue q JOIN sources s ON s.id=q.source_id WHERE q.status='pending' AND s.text<>'' AND s.status NOT IN ('expired','forgotten','reviewed')"
+                    + where,
+                    args,
+                ).fetchone()[0],
+                "pending_interactions": self.db.execute(
+                    "SELECT count(*) FROM learning_queue q JOIN sources s ON s.id=q.source_id "
+                    "WHERE q.lane='interaction' AND q.status='pending' AND s.text<>'' "
+                    "AND s.status NOT IN ('forgotten','expired','reviewed')" + where,
+                    args,
                 ).fetchone()[0],
                 "feedback_events": self.db.execute(
                     "SELECT count(*) FROM feedback_events"

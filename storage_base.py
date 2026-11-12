@@ -1401,17 +1401,22 @@ class StorageBase:
                 )
             ]
 
-    def stats(self) -> dict:
+    def stats(self, persona_id=None) -> dict:
         with self._lock:
+            where = " AND persona_id=?" if persona_id is not None else ""
+            args = (persona_id,) if persona_id is not None else ()
             return {
                 "sources": self.db.execute(
-                    "SELECT count(*) FROM sources WHERE text<>''"
+                    "SELECT count(*) FROM sources WHERE text<>''" + where, args
                 ).fetchone()[0],
                 "pending_sources": self.db.execute(
-                    "SELECT count(*) FROM sources WHERE status='pending'"
+                    "SELECT count(*) FROM sources WHERE status='pending'" + where, args
+                ).fetchone()[0],
+                "pending_memories": self.db.execute(
+                    "SELECT count(*) FROM memories WHERE status='pending'" + where, args
                 ).fetchone()[0],
                 "memories": self.db.execute(
-                    "SELECT count(*) FROM memories WHERE status='active'"
+                    "SELECT count(*) FROM memories WHERE status='active'" + where, args
                 ).fetchone()[0],
                 "active_styles": self.db.execute(
                     "SELECT count(*) FROM styles WHERE status='active'"
