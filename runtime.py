@@ -226,7 +226,10 @@ class Runtime:
                     "set_meta", "last_dream:" + settings.persona_id, time.time()
                 )
             elif last < dream_at.timestamp():
-                await self.db("dream", settings.persona_id, cutoff=dream_at.timestamp())
+                async with self.lock:
+                    await self.db(
+                        "dream", settings.persona_id, cutoff=dream_at.timestamp()
+                    )
         if scope_key is None:
             await self.db(
                 "cleanup",

@@ -250,6 +250,7 @@ class MockContext:
         self.persona_manager = PersonaManager()
         self.conversation_manager = SimpleNamespace(
             get_curr_conversation_id=AsyncMock(return_value="conversation-1"),
+            update_conversation=AsyncMock(),
             get_conversation=AsyncMock(
                 return_value=SimpleNamespace(persona_id="可可子", history=[])
             ),

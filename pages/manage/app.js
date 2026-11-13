@@ -556,7 +556,7 @@ function renderConfig({ replace = false } = {}) {
     if (layout.id === "lifecycle") {
       const dream = node("div", "", "settings-callout");
       const dreamCopy = node("div"), dreamStatus = node("p"); dreamStatus.id = "settings-dream-status";
-      dreamCopy.append(node("strong", "手动入梦"), dreamStatus, node("p", "立即清理日常记忆；关闭定时入梦时也可使用，不会提交未保存的设置。"));
+      dreamCopy.append(node("strong", "手动入梦"), dreamStatus, node("p", "清理日常记忆，各群下次聊天从空历史开始，已保存记忆继续加载。关闭定时入梦时也可使用，不会提交未保存的设置。"));
       const dreamButton = mutationButton("立即入梦", requestDream, { danger: true }); dreamButton.id = "settings-dream-now";
       dream.append(dreamCopy, dreamButton); section.append(dream);
       const types = node("div", "", "memory-types");
@@ -803,7 +803,7 @@ function renderOverview() {
   details.replaceChildren();
   const status = object(state.status);
   const capture = object(status.capture);
-  addMeta(details, "运行版本", `${status.runtime_version ? `v${status.runtime_version}` : "未知"} / 页面 v2.3.1`);
+  addMeta(details, "运行版本", `${status.runtime_version ? `v${status.runtime_version}` : "未知"} / 页面 v2.3.2`);
   addMeta(details, "已采集原文", countText(status.sources));
   addMeta(details, "待整理对话", countText(status.pending_interactions));
   addMeta(details, "生效记忆", countText(status.memories));
@@ -1141,8 +1141,8 @@ byId("catalog-next").addEventListener("click",()=>perform(async()=>{if(catalogOf
 async function requestDream() {
   if (busy || !ready || dialogRequest) return;
   const persona = selectedPersona;
-  if (await ask({ title: "立即入梦", description: `清理人格「${persona}」下所有群、所有用户的日常记忆，清理后无法从页面恢复。时效、缓存和长期记忆按各自规则保留。此操作不会保存配置草稿。`, submit: "入梦并清理", danger: true })) {
-    await perform(() => action("memory_dream", { persona_id: persona }), "已入梦，日常记忆已清理。");
+  if (await ask({ title: "立即入梦", description: `清理人格「${persona}」下所有群、所有用户的日常记忆，各群下次聊天从空的对话历史开始；历史清理后无法从页面恢复。时效、缓存和长期记忆按各自规则保留并继续加载。此操作不会保存配置草稿。`, submit: "入梦并清理", danger: true })) {
+    await perform(() => action("memory_dream", { persona_id: persona }), "已入梦，日常记忆已清理，各群下次聊天将重置上下文。");
   }
 }
 byId("dream-now").addEventListener("click", requestDream);

@@ -94,6 +94,7 @@ test("manual dream from settings requires confirmation and preserves the draft p
   const cancelled = ui.elements.get("settings-dream-now").handlers.click();
   assert.equal(ui.elements.get("action-dialog").open, true);
   assert.match(ui.elements.get("dialog-description").textContent, /人格「可可子」/);
+  assert.match(ui.elements.get("dialog-description").textContent, /下次聊天从空的对话历史开始/);
   assert.equal(ui.posts.length, 0);
   ui.elements.get("dialog-cancel").handlers.click(); await cancelled;
   assert.equal(ui.posts.length, 0);
@@ -534,7 +535,7 @@ test("overview separates captured dialogue, pending extraction and stored memory
   ui.view.schedule = { state: "budget", reason: "预计 20009 tokens，单次上限 20000 tokens", groups: [] };
   await vm.runInContext("loadState()", ui.sandbox);
   const detail = textOf(ui.elements.get("schedule-details"));
-  assert.match(detail, /运行版本：v2\.2\.1 \/ 页面 v2\.3\.1/);
+  assert.match(detail, /运行版本：v2\.2\.1 \/ 页面 v2\.3\.2/);
   assert.match(detail, /已采集原文：24/);
   assert.match(detail, /待整理对话：20/);
   assert.match(detail, /生效记忆：0/);
@@ -573,7 +574,7 @@ test("empty learning calls explain zero capture, paused and disabled learning wi
 test("legacy overview diagnostics remain unknown and translate active scheduler states", async () => {
   const ui = page(); await flush();
   const detail = textOf(ui.elements.get("schedule-details"));
-  assert.match(detail, /运行版本：未知 \/ 页面 v2\.3\.1/);
+  assert.match(detail, /运行版本：未知 \/ 页面 v2\.3\.2/);
   assert.match(detail, /已采集原文：—/);
   assert.match(detail, /待整理对话：—/);
   assert.match(detail, /待确认记忆：—/);

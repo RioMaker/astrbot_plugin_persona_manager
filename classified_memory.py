@@ -619,6 +619,8 @@ class ClassifiedMemoryStore:
                 )
                 self.index_memory(mid)
             self.set_meta("last_dream:" + persona_id, self.clock())
+            key = "dream_context:" + persona_id
+            self.set_meta(key, self.get_meta(key, 0) + 1)
             self._bump_epoch()
             return len(ids)
 

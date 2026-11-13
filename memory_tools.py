@@ -167,9 +167,13 @@ class MemoryTools:
                     )
                 epoch = await self.runtime.db("epoch")
                 if action != "consolidate":
-                    return await asyncio.to_thread(
+                    result = await asyncio.to_thread(
                         self._perform, source, settings, epoch, action, arguments
                     )
+                    if action == "dream":
+                        await self.plugin.dream_context.discard_stale(event)
+                        result["context_reset"] = "next_chat"
+                    return result
             # Never retain runtime.lock while the scheduler acquires it itself.
             await self.runtime.run_once(scope_key=source["scope_key"])
             async with self.runtime.lock:
