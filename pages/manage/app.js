@@ -219,6 +219,9 @@ function renderState(replaceCore) {
   byId("learning-toggle").textContent = isPaused ? "恢复学习" : "暂停学习";
   byId("status-detail").textContent = string(status);
   byId("persona-caption").textContent = selectedPersona ? `正在管理：${selectedPersona}` : "后端未返回人格 ID，请检查插件配置。";
+  // Keep memory diagnostics visible even if a later, unrelated panel fails.
+  renderOverview();
+  renderArchive();
   if (!coreDirty || replaceCore) {
     byId("core-content").value = string(first(state.persona?.core, state.persona?.content, ""));
     coreDirty = false;
@@ -233,8 +236,6 @@ function renderState(replaceCore) {
   renderStyles();
   fillVersions("style", array(state.style_versions));
   renderConfig();
-  renderOverview();
-  renderArchive();
 }
 
 function renderCoreDirty() {
@@ -799,7 +800,7 @@ function renderOverview() {
   details.replaceChildren();
   const status = object(state.status);
   const capture = object(status.capture);
-  addMeta(details, "运行版本", `${status.runtime_version ? `v${status.runtime_version}` : "未知"} / 页面 v2.2.1`);
+  addMeta(details, "运行版本", `${status.runtime_version ? `v${status.runtime_version}` : "未知"} / 页面 v2.2.2`);
   addMeta(details, "已采集原文", countText(status.sources));
   addMeta(details, "待整理对话", countText(status.pending_interactions));
   addMeta(details, "生效记忆", countText(status.memories));

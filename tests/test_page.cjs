@@ -502,7 +502,7 @@ test("overview separates captured dialogue, pending extraction and stored memory
   ui.view.schedule = { state: "budget", reason: "预计 20009 tokens，单次上限 20000 tokens", groups: [] };
   await vm.runInContext("loadState()", ui.sandbox);
   const detail = textOf(ui.elements.get("schedule-details"));
-  assert.match(detail, /运行版本：v2\.2\.1 \/ 页面 v2\.2\.1/);
+  assert.match(detail, /运行版本：v2\.2\.1 \/ 页面 v2\.2\.2/);
   assert.match(detail, /已采集原文：24/);
   assert.match(detail, /待整理对话：20/);
   assert.match(detail, /生效记忆：0/);
@@ -541,7 +541,7 @@ test("empty learning calls explain zero capture, paused and disabled learning wi
 test("legacy overview diagnostics remain unknown and translate active scheduler states", async () => {
   const ui = page(); await flush();
   const detail = textOf(ui.elements.get("schedule-details"));
-  assert.match(detail, /运行版本：未知 \/ 页面 v2\.2\.1/);
+  assert.match(detail, /运行版本：未知 \/ 页面 v2\.2\.2/);
   assert.match(detail, /已采集原文：—/);
   assert.match(detail, /待整理对话：—/);
   assert.match(detail, /待确认记忆：—/);
@@ -554,6 +554,24 @@ test("legacy overview diagnostics remain unknown and translate active scheduler 
     assert.equal(ui.elements.get("schedule-status").textContent, label);
     assert.match(textOf(ui.elements.get("schedule-groups")), new RegExp(label));
   }
+});
+
+test("configuration rendering failures leave current memory diagnostics visible and report the error", async () => {
+  const ui = page(); await flush();
+  Object.assign(ui.view.status, { sources: 50, pending_interactions: 20, memories: 0, pending_memories: 1 });
+  ui.view.schedule = { state: "collecting", reason: "已采集对话，等待下一次整理", groups: [] };
+  ui.view.memory_catalog = { total: 1, items: [{ id: 8, user_id: "__knowledge__", key: "太鼓手法", content: "双手交替需要保持节奏", category: "knowledge", status: "pending", hold_reason: "knowledge", revision: 1 }] };
+  vm.runInContext('renderConfig = () => { throw new Error("配置面板渲染失败（注入测试）"); };', ui.sandbox);
+  await ui.elements.get("refresh").handlers.click();
+  assert.equal(ui.elements.get("schedule-status").textContent, "积累对话");
+  assert.match(textOf(ui.elements.get("schedule-details")), /已采集原文：50.*待整理对话：20.*待确认记忆：1/);
+  assert.match(textOf(ui.elements.get("catalog-items")), /太鼓手法.*双手交替需要保持节奏/);
+  assert.match(ui.elements.get("catalog-count").textContent, /共 1 条/);
+  const notice = ui.elements.get("notice");
+  assert.equal(notice.textContent, "配置面板渲染失败（注入测试）");
+  assert.equal(notice.className, "notice error");
+  assert.equal(notice.hidden, false);
+  assert.equal(ui.posts.length, 0);
 });
 
 test("direction example only changes the local draft", async () => {

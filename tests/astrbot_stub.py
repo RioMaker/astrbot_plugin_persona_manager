@@ -328,6 +328,7 @@ def install(monkeypatch, data_path):
         "permission_type",
         "on_decorating_result",
         "on_llm_response",
+        "on_llm_tool_respond",
         "llm_tool",
     ):
         setattr(filters, name, decorator(name))

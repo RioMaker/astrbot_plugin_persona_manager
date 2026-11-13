@@ -21,6 +21,7 @@ from astrbot.core.star.session_plugin_manager import SessionPluginManager
 from astrbot.core.utils.astrbot_path import get_astrbot_data_path
 
 from .configuration import page_config, revision, usage_for_page, validate_changes
+from .delivery import confirmed_result_delivery, confirmed_tool_delivery
 from .groups import GroupDiscovery
 from .ingress import group_identity, sample
 from .memory_tools import MemoryTools
@@ -30,7 +31,7 @@ from .storage import Store
 from .temporal import BEIJING
 
 PLUGIN_NAME = "astrbot_plugin_persona_manager"
-PLUGIN_VERSION = "2.2.1"
+PLUGIN_VERSION = "2.2.2"
 GATE_NAME = "astrbot_plugin_access_gate"
 PENDING_KEY = PLUGIN_NAME + ":interaction"
 SENT_KEY = PLUGIN_NAME + ":sent"
@@ -345,27 +346,42 @@ class PersonaManagerPlugin(Star):
             event.unified_msg_origin, event.get_platform_name(), req
         )
 
-    async def _selected_origin(self, umo, platform_name, req=None) -> bool:
+    async def _conversation_persona_id(self, umo, req=None):
         conversation = getattr(req, "conversation", None)
         if conversation is None:
             manager = self.context.conversation_manager
             cid = await manager.get_curr_conversation_id(umo)
             if cid:
                 conversation = await manager.get_conversation(umo, cid)
-        persona_id = getattr(conversation, "persona_id", None)
+        return getattr(conversation, "persona_id", None)
+
+    async def _selected_origin(self, umo, platform_name, req=None) -> bool:
         manager = self.context.persona_manager
         resolver = getattr(manager, "resolve_selected_persona", None)
         if callable(resolver):
-            persona_id, _, _, _ = await resolver(
-                umo=umo,
-                conversation_persona_id=persona_id,
-                platform_name=platform_name,
-            )
-        elif persona_id is None:
-            persona = manager.get_default_persona_v3(umo=umo)
-            if inspect.isawaitable(persona):
-                persona = await persona
-            persona_id = persona.get("name") if isinstance(persona, dict) else None
+            signature = inspect.signature(resolver)
+            kwargs = {"umo": umo, "platform_name": platform_name}
+            # Released 4.29.x resolves conversation/session overrides and returns
+            # four fields. Newer cores own all selection in effective config,
+            # remove conversation_persona_id, and return three fields instead.
+            if "conversation_persona_id" in signature.parameters:
+                kwargs["conversation_persona_id"] = await self._conversation_persona_id(
+                    umo, req
+                )
+            signature.bind(**kwargs)
+            resolved = await resolver(**kwargs)
+            if not isinstance(resolved, tuple) or len(resolved) not in {3, 4}:
+                raise ValueError("Unsupported AstrBot persona resolution result")
+            persona_id = resolved[0]
+            if persona_id is not None and not isinstance(persona_id, str):
+                raise ValueError("Unsupported AstrBot persona identifier")
+        else:
+            persona_id = await self._conversation_persona_id(umo, req)
+            if persona_id is None:
+                persona = manager.get_default_persona_v3(umo=umo)
+                if inspect.isawaitable(persona):
+                    persona = await persona
+                persona_id = persona.get("name") if isinstance(persona, dict) else None
         return persona_id == self.settings().persona_id
 
     @filter.event_message_type(filter.EventMessageType.ALL, priority=9998)
@@ -551,9 +567,15 @@ class PersonaManagerPlugin(Star):
 
     @filter.on_decorating_result(priority=-100)
     async def after_stream(self, event: AstrMessageEvent):
+        # Native send_message_to_user may already have delivered this text.
+        # RespondStage suppresses the duplicate without after_message_sent.
+        result = event.get_result()
+        delivered = confirmed_result_delivery(event, result)
+        if delivered is not None:
+            await self._record_interaction(event, reply_override=delivered)
+            return
         # RespondStage skips after_message_sent for streaming. The framework
         # creates STREAMING_FINISH only after the stream has been consumed.
-        result = event.get_result()
         if (
             not result
             or getattr(result, "result_content_type", None)
@@ -564,7 +586,17 @@ class PersonaManagerPlugin(Star):
             return
         await self._record_interaction(event)
 
-    async def _record_interaction(self, event):
+    @filter.on_llm_tool_respond()
+    async def on_tool_delivery(
+        self, event: AstrMessageEvent, tool, tool_args, tool_result
+    ):
+        # The native tool hook runs after successful delivery, even when the
+        # model produces no final reply and no result/send hooks will run.
+        delivered = confirmed_tool_delivery(event, tool, tool_args, tool_result)
+        if delivered is not None:
+            await self._record_interaction(event, reply_override=delivered)
+
+    async def _record_interaction(self, event, *, reply_override=None):
         settings = self.settings()
         if group_identity(event, settings) is None or event.get_extra(SENT_KEY, False):
             return
@@ -582,10 +614,14 @@ class PersonaManagerPlugin(Star):
             event.set_extra(SENT_KEY, True)
             trace = event.get_extra(TRACE_KEY, {})
             result = event.get_result()
-            reply = "".join(
-                str(part.text)
-                for part in getattr(result, "chain", [])
-                if type(part).__name__ == "Plain"
+            reply = (
+                reply_override
+                if reply_override is not None
+                else "".join(
+                    str(part.text)
+                    for part in getattr(result, "chain", [])
+                    if type(part).__name__ == "Plain"
+                )
             )
             await self.runtime.record_delivery(
                 source, reply, trace, epoch=trace.get("epoch")
