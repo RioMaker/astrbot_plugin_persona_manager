@@ -74,7 +74,8 @@ def test_native_wake_records_only_after_actual_delivery(entry, actual_gate, stre
     asyncio.run(run())
 
 
-def test_native_wake_tools_require_hook_authorization(entry, actual_gate):
+@pytest.mark.parametrize("prefix", ["请记住：", ""])
+def test_native_wake_tools_require_hook_authorization(entry, actual_gate, prefix):
     async def run():
         context = MockContext()
         gate = actual_gate(
@@ -82,7 +83,7 @@ def test_native_wake_tools_require_hook_authorization(entry, actual_gate):
         )
         context.stars[0].star_cls = gate
         async with entry.running(native_config(), context) as env:
-            event, req = await native_event(gate, "请记住：双手交替需要保持节奏")
+            event, req = await native_event(gate, prefix + "双手交替需要保持节奏")
             service = MemoryTools(env.plugin)
             arguments = {
                 "key": "太鼓手法",

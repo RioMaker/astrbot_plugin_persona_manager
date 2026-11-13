@@ -44,7 +44,7 @@ def test_capture_explains_missing_or_saved_dialogue_without_exposing_text(entry,
             await env.plugin.after_sent(event)
             result = await route(env.context, "state")()
             status = result["status"]
-            assert status["runtime_version"] == "2.2.2"
+            assert status["runtime_version"] == "2.3.0"
             assert status["capture"]["state"] == case
             assert body not in json.dumps(status["capture"], ensure_ascii=False)
             assert status["pending_interactions"] == (1 if case == "stored" else 0)

@@ -47,7 +47,7 @@ async def remember(env, content="双手交替需要保持节奏", *, category="c
 def test_tools_reject_ineligible_chat_without_writing(entry, boundary):
     async def run():
         async with entry.running() as env:
-            text = "请记住：双手交替需要保持节奏"
+            text = "双手交替需要保持节奏"
             event = approved(
                 text,
                 private=boundary == "private",
@@ -110,17 +110,119 @@ def test_remember_is_durable_idempotent_and_does_not_call_an_extra_model(entry):
 
 
 @pytest.mark.parametrize(
+    "category", ["timed", "daily", "cache", "relationship", "knowledge"]
+)
+def test_ai_can_remember_without_user_request_through_chat_tool(entry, category):
+    async def run():
+        async with entry.running({"memory_groups": ["234567"]}) as env:
+            content = "我更喜欢简短的回答"
+            event = approved(content)
+            arguments = dict(
+                action="remember",
+                key="回答偏好",
+                content=content,
+                quote=content,
+                category=category,
+            )
+            saved = json.loads(
+                await env.plugin.persona_memory_write(event, **arguments)
+            )
+            assert saved["ok"], saved
+            assert saved["status"] == (
+                "pending" if category == "knowledge" else "active"
+            )
+            row = env.plugin.store.get_memory(saved["memory_id"])
+            assert row["user_id"] == (
+                "__knowledge__" if category == "knowledge" else event.get_sender_id()
+            )
+            assert row["content"] == content
+            assert row["evidence"][0]["quote"] == content
+            assert not row["admin_forced"]
+            repeated = json.loads(
+                await env.plugin.persona_memory_write(event, **arguments)
+            )
+            assert repeated["ok"] and repeated["replayed"]
+            assert repeated["memory_id"] == saved["memory_id"]
+            found = json.loads(
+                await env.plugin.persona_memory_search(
+                    approved("我的回答偏好是什么", message_id="recall"),
+                    memory_id=saved["memory_id"],
+                )
+            )
+            assert found["ok"] and found["memories"][0]["content"] == content
+            assert env.plugin.store.memory_catalog("可可子")["total"] == 1
+            env.context.llm_generate.assert_not_called()
+
+    asyncio.run(run())
+
+
+@pytest.mark.parametrize(
+    "instruction",
+    [
+        "不要记住这件事",
+        "不要记",
+        "别记了",
+        "别保存这些信息",
+        "不用记录",
+        "不需要记录",
+        "不要把这条消息写入记忆",
+        "Don't remember this",
+        "Don’t save this",
+        "Do not store this",
+        "Never memorize this",
+    ],
+)
+def test_ai_remember_respects_sender_refusal_without_creating_source(
+    entry, instruction
+):
+    async def run():
+        async with entry.running() as env:
+            content = "我更喜欢简短的回答"
+            result = await MemoryTools(env.plugin).execute(
+                approved(content + "。" + instruction),
+                "remember",
+                key="回答偏好",
+                content=content,
+                evidence=content,
+                category="relationship",
+            )
+            assert not result["ok"]
+            assert "不要记忆" in result["error"]
+            assert env.plugin.store.memory_catalog("可可子")["total"] == 0
+            assert env.plugin.store.pending_sources() == []
+
+    asyncio.run(run())
+
+
+@pytest.mark.parametrize(
+    "suffix", ["刚才看到一句“不要记住这件事”。", "别忘记这一点", "Don't forget this"]
+)
+def test_quoted_refusal_and_do_not_forget_do_not_block_ai_remember(entry, suffix):
+    async def run():
+        async with entry.running() as env:
+            content = "我更喜欢简短的回答"
+            result = await MemoryTools(env.plugin).execute(
+                approved(content + "。" + suffix),
+                "remember",
+                key="回答偏好",
+                content=content,
+                category="relationship",
+            )
+            assert result["ok"], result
+
+    asyncio.run(run())
+
+
+@pytest.mark.parametrize(
     "text,content,evidence,category",
     [
-        ("今天聊聊太鼓", "今天聊聊太鼓", "今天聊聊太鼓", "cache"),
-        ("不要记住这件事", "这件事", "这件事", "cache"),
         ("请记住：双手交替", "我已经全良所有曲目", "双手交替", "cache"),
         ("请记住：双手交替", "双手交替", "不存在的原话", "cache"),
         ("请记住：双手交替", "双手交替", "双手交替", "self"),
         ("请记住：双手交替", "双手交替", "双手交替", "event"),
     ],
 )
-def test_write_needs_explicit_intent_and_real_current_message_evidence(
+def test_write_needs_real_current_message_evidence_and_valid_category(
     entry, text, content, evidence, category
 ):
     async def run():
@@ -355,19 +457,55 @@ def test_requested_consolidation_does_not_bypass_zero_token_quota(entry):
     asyncio.run(run())
 
 
-def test_paused_learning_keeps_status_readable_but_blocks_new_writes(entry):
+@pytest.mark.parametrize("switch", ["paused", "disabled"])
+def test_paused_learning_keeps_status_readable_but_blocks_ai_writes(entry, switch):
     async def run():
         async with entry.running() as env:
-            env.plugin.store.set_meta("paused", True)
-            event = approved("请记住：双手交替", message_id="paused-write")
+            if switch == "paused":
+                env.plugin.store.set_meta("paused", True)
+            else:
+                env.plugin.config["learning_enabled"] = False
+            event = approved("双手交替", message_id="paused-write")
             service = MemoryTools(env.plugin)
             status = await service.execute(event, "status")
-            assert status["ok"] and status["paused"]
+            assert status["ok"]
+            assert status["paused"] or not status["learning_enabled"]
             result = await service.execute(
                 event, "remember", key="手法", content="双手交替", category="cache"
             )
             assert result["ok"] is False
             assert env.plugin.store.memory_catalog("可可子")["total"] == 0
+
+    asyncio.run(run())
+
+
+@pytest.mark.parametrize(
+    "action", ["correct", "forget", "consolidate", "knowledge_confirm", "dream"]
+)
+def test_ai_autonomy_only_grants_new_memories_not_other_mutations(entry, action):
+    async def run():
+        async with entry.running() as env:
+            _, memory = await remember(env)
+            env.context.cfg["admins_id"] = ["123456"]
+            content = "双手交替需要放松手腕"
+            result = await MemoryTools(env.plugin).execute(
+                approved(content, message_id="no-mutation-request"),
+                action,
+                memory_id=memory["id"],
+                revision=memory["revision"],
+                key="太鼓手法",
+                content=content,
+                evidence=content,
+                confirm=True,
+            )
+            assert not result["ok"]
+            assert "没有明确要求" in result["error"]
+            assert (
+                env.plugin.store.get_memory(memory["id"])["content"]
+                == memory["content"]
+            )
+            assert env.plugin.store.memory_catalog("可可子")["total"] == 1
+            env.context.llm_generate.assert_not_called()
 
     asyncio.run(run())
 
@@ -542,7 +680,7 @@ def test_main_tools_register_and_route_even_when_memory_is_empty(entry):
 
     async def run():
         async with entry.running() as env:
-            event = approved("请记住太鼓手法")
+            event = approved("我更喜欢简短的回答")
             req = request()
             req.func_tool.tools.extend(SimpleNamespace(name=name) for name in names)
             before = snapshot(req)
@@ -556,6 +694,8 @@ def test_main_tools_register_and_route_even_when_memory_is_empty(entry):
             assert len(blocks) == 1
             assert blocks[0].temporary
             assert "persona_memory_write" in blocks[0].text
+            assert "action=remember" in blocks[0].text
+            assert "无需等待用户" in blocks[0].text
             assert snapshot(req) == before
             assert env.plugin.store.memory_catalog("可可子")["total"] == 0
             env.context.llm_generate.assert_not_called()

@@ -1,8 +1,9 @@
 """Evidence-bound chat operations over the existing memory store.
 
 Tool arguments never supply an actor, persona, group or authorization decision.
-Writes use the sender's own current text, and database checks and mutations share
-one transaction. No operation creates a file or calls a second model directly.
+AI may remember the sender's own current text without a storage request, unless
+the sender declines. Other mutations still need explicit intent. Database checks
+and mutations share one transaction; no files or extra model calls are created.
 """
 
 import asyncio
@@ -18,13 +19,27 @@ from .retrieval import overlap
 from .temporal import BEIJING
 
 _INTENTS = {
-    "remember": r"记住|记下|记着|记牢|保存|记录|remember|memorize",
     "correct": r"纠正|更正|改成|改为|记错|修改.{0,12}记忆|correct|update.{0,15}memor",
     "forget": r"忘记|忘掉|遗忘|删除|别记|不要记|forget|delete.{0,15}memor",
     "knowledge_confirm": r"灌输|(?:确认|核实).{0,12}(?:知识|事实)|(?:知识|事实).{0,12}(?:确认|核实)",
     "dream": r"入梦|清理.{0,8}日常记忆",
     "consolidate": r"整理.{0,15}记忆|总结.{0,15}记忆|记忆.{0,15}整理",
 }
+
+
+def _declines_memory(body):
+    # Quoted instructions do not express the current sender's preference.
+    plain = re.sub(r'“[^”]*”|「[^」]*」|『[^』]*』|"[^"\n]*"', "", body)
+    return bool(
+        re.search(
+            r"(?:不要|别|不许|不必|无需|不用|不需要|禁止|不想|不能|不准|勿).{0,12}"
+            r"(?:记住|记下|记着|记牢|记录|记在|记入|记进|记到|保存|存储|储存|留存|写入.{0,4}记忆)"
+            r"|(?:不要|别|不用|不必|无需)记(?:了|[，。！？!?\s]|$)"
+            r"|\b(?:don['’]t|do\s+not|never)\b.{0,20}\b(?:remember|memorize|memorise|save|store|record)\b",
+            plain,
+            re.I,
+        )
+    )
 
 
 def _intent(body, action):
@@ -124,11 +139,13 @@ class MemoryTools:
 
     async def execute(self, event, action, **arguments):
         """Return a bounded result; errors are never represented as successful writes."""
-        if action not in {*_INTENTS, "search", "status"}:
+        if action not in {*_INTENTS, "remember", "search", "status"}:
             return {"ok": False, "status": "denied", "error": "未知记忆操作。"}
         try:
             async with self.runtime.lock:
                 source, settings = await self._authorize(event)
+                if action == "remember" and _declines_memory(own_text(event)):
+                    raise ValueError("当前发送者明确表示不要记忆，未保存。")
                 if action in _INTENTS and not _intent(own_text(event), action):
                     raise ValueError("当前发送者没有明确要求此操作，请勿自行修改记忆。")
                 if action in {"dream", "knowledge_confirm"}:
