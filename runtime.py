@@ -559,7 +559,11 @@ class Runtime:
                 )
                 if purpose == "interaction":
                     self.thinking_scope = scope
-                    if settings.thinking_notice and self.thinking_callback:
+                    if (
+                        settings.thinking_notice
+                        and settings.thinking_notice_text
+                        and self.thinking_callback
+                    ):
                         try:
                             await asyncio.wait_for(
                                 self.thinking_callback(selected[0]), timeout=5

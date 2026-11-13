@@ -31,7 +31,7 @@ from .storage import Store
 from .temporal import BEIJING
 
 PLUGIN_NAME = "astrbot_plugin_persona_manager"
-PLUGIN_VERSION = "2.3.0"
+PLUGIN_VERSION = "2.3.1"
 GATE_NAME = "astrbot_plugin_access_gate"
 PENDING_KEY = PLUGIN_NAME + ":interaction"
 SENT_KEY = PLUGIN_NAME + ":sent"
@@ -227,11 +227,14 @@ class PersonaManagerPlugin(Star):
         )
 
     async def _thinking_notice(self, source):
-        if await self._source_allowed(source):
+        settings = self.settings()
+        if not settings.thinking_notice or not settings.thinking_notice_text:
+            return
+        if await self._source_allowed(source) and self.settings() == settings:
             from astrbot.api.event import MessageChain
 
             await self.context.send_message(
-                source["umo"], MessageChain().message("正在思考，整理一下刚才的记忆……")
+                source["umo"], MessageChain().message(settings.thinking_notice_text)
             )
 
     async def initialize(self):

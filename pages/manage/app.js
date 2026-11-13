@@ -244,7 +244,7 @@ function renderCoreDirty() {
 }
 
 const settingsLayout = [
-  { id: "rhythm", title: "整理节奏", caption: "什么时候开始思考", description: "按群积累已回复的对话，达到门槛后批量整理；仍受时段、间隔与预算约束。", fields: ["enabled", "learning_enabled", "persona_id", "memory_enabled", "memory_batch_threshold", "batch_size", "thinking_notice"] },
+  { id: "rhythm", title: "整理节奏", caption: "什么时候开始思考", description: "按群积累已回复的对话，达到门槛后批量整理；可修改发到群里的思考提示，整理仍受时段、间隔与预算约束。", fields: ["enabled", "learning_enabled", "persona_id", "memory_enabled", "memory_batch_threshold", "batch_size", "thinking_notice", "thinking_notice_text"] },
   { id: "lifecycle", title: "记忆生命周期", caption: "七类记忆如何留存", description: "短期按时间、入梦或容量清理；长期保留来源、证据与审核状态。", fields: ["short_cache_capacity", "auto_dream", "dream_hour", "knowledge_confirmations", "event_salience_threshold"] },
   { id: "budget", title: "模型与预算", caption: "模型选择与用量上限", description: "记忆整理按输入与输出合计记账。1 Mtokens = 100 万 tokens；任一相关限额为 0 时停止模型整理。", fields: ["memory_daily_mtokens", "memory_monthly_mtokens", "learning_provider_id", "model_timeout_seconds", "max_output_tokens", "daily_calls", "daily_group_calls", "daily_token_limit", "daily_group_token_limit"] },
   { id: "groups", title: "群与共享", caption: "哪些群可以学习、读取", description: "门禁负责放行；此处控制记忆与表达权限。每位用户统一存储记忆，各群是否读取公共记忆单独设置。", fields: ["memory_default_enabled", "observation_groups", "memory_groups", "memory_disabled_groups", "public_memory_groups", "global_style_groups", "group_tags", "ignored_qq"] },
@@ -317,7 +317,7 @@ function renderSettingsPreview() {
   const auto = array(state?.classifiers).filter((cls) => cls.status === "auto").length;
   const steps = [
     ["01", "积累对话", draftDisplay("memory_batch_threshold", " 条后整理"), "每群独立积累", "rhythm"],
-    ["02", "思考整理", "批量提炼记忆", configControls.get("thinking_notice")?.checked ? "开启来源群思考提示" : "仅控制台显示思考状态", "rhythm"],
+    ["02", "思考整理", "批量提炼记忆", configControls.get("thinking_notice")?.checked && configControls.get("thinking_notice_text")?.value.trim() ? "开启来源群思考提示" : "仅控制台显示思考状态", "rhythm"],
     ["03", "按属性留存", "3 类短期 · 4 类长期", "到期、入梦、容量淘汰", "lifecycle"],
     ["04", "确认新分类", pending ? `${pending} 类长期待确认` : "长期确认后使用", `短期自动通过 · ${auto} 类待核对`, "archive"],
   ];
@@ -602,7 +602,7 @@ function renderConfig({ replace = false } = {}) {
   const fieldsByName = new Map();
   for (const [name, schemaValue] of Object.entries(configSchema)) {
     const schema = object(schemaValue);
-    const field = node("div", "", `field config-field${schema.type === "list" || name === "evolution_guidance" ? " wide-field" : ""}`);
+    const field = node("div", "", `field config-field${["list", "text"].includes(schema.type) || name === "evolution_guidance" ? " wide-field" : ""}`);
     const label = node("label", schema.description || name);
     label.htmlFor = `setting-${name}`;
     let control;
@@ -625,6 +625,8 @@ function renderConfig({ replace = false } = {}) {
       control.rows = name === "evolution_guidance" ? 9 : 3;
       control.value = configValueText(configBase[name], schema);
       if (schema.type === "list") control.placeholder = "每行一项；留空表示空列表";
+      if (schema.maxLength !== undefined) control.maxLength = schema.maxLength;
+      if (name === "thinking_notice_text") control.placeholder = "留空时不发送群内思考提示";
       if (name === "evolution_guidance") {
         control.maxLength = 4000;
         control.placeholder = "写下希望可可子逐渐形成的表达习惯、学习重点，以及应当避免的倾向……";
@@ -724,6 +726,7 @@ function changedConfigValues() {
     } else if (schema.type === "list") value = [...new Set(control.value.split(/\r?\n/).map((item) => item.trim()).filter(Boolean))];
     else value = control.value.trim();
     if (name === "evolution_guidance" && value.length > 4000) throw configInputError(name, "进化方向最多 4000 字。");
+    if (["string", "text"].includes(schema.type) && schema.maxLength !== undefined && Array.from(value).length > schema.maxLength) throw configInputError(name, `${schema.description || name}最多 ${schema.maxLength} 字。`);
     if (JSON.stringify(value) !== JSON.stringify(configBase[name])) changes[name] = value;
   }
   return changes;
@@ -800,7 +803,7 @@ function renderOverview() {
   details.replaceChildren();
   const status = object(state.status);
   const capture = object(status.capture);
-  addMeta(details, "运行版本", `${status.runtime_version ? `v${status.runtime_version}` : "未知"} / 页面 v2.3.0`);
+  addMeta(details, "运行版本", `${status.runtime_version ? `v${status.runtime_version}` : "未知"} / 页面 v2.3.1`);
   addMeta(details, "已采集原文", countText(status.sources));
   addMeta(details, "待整理对话", countText(status.pending_interactions));
   addMeta(details, "生效记忆", countText(status.memories));

@@ -10,6 +10,7 @@ function page(options = {}) {
   const posts = [];
   const schema = JSON.parse(fs.readFileSync(path.join(__dirname, "../_conf_schema.json"), "utf8"));
   schema.daily_calls = { ...schema.daily_calls, minimum: 0, maximum: 100 };
+  schema.thinking_notice_text = { ...schema.thinking_notice_text, maxLength: 1000 };
   const view = {
     status: { paused: false, enabled: true, learning_enabled: true },
     persona: { id: "可可子", core: "原核心", versions: [] },
@@ -399,6 +400,37 @@ test("configuration saves only edited values against the original revision", asy
   assert.equal(ui.elements.get("config-save").disabled, true);
 });
 
+test("group notice content supports multiline drafts, saving and silent mode", async () => {
+  const ui = page(); await flush();
+  const field = ui.elements.get("setting-thinking_notice_text");
+  assert.equal(field.tagName, "TEXTAREA");
+  assert.equal(field.maxLength, 1000);
+  assert.equal(vm.runInContext('settingsPanelFor("thinking_notice_text")', ui.sandbox), "rhythm");
+  const text = "让我想一想～\n整理一下刚才的聊天。";
+  edit(ui, "thinking_notice_text", text);
+  ui.elements.get("settings-nav-budget").handlers.click();
+  await vm.runInContext("loadState()", ui.sandbox);
+  assert.equal(ui.elements.get("setting-thinking_notice_text").value, text);
+  await ui.elements.get("settings-form").handlers.submit({ preventDefault() {} });
+  assert.deepEqual(ui.posts[0].payload.values, { thinking_notice_text: text });
+  edit(ui, "thinking_notice_text", " \n ");
+  assert.match(textOf(ui.elements.get("settings-flow")), /仅控制台显示思考状态/);
+  await ui.elements.get("settings-form").handlers.submit({ preventDefault() {} });
+  assert.deepEqual(ui.posts[1].payload.values, { thinking_notice_text: "" });
+  assert.equal(ui.elements.get("setting-thinking_notice_text").value, "");
+});
+
+test("overlong group notice stays in the draft and points to rhythm settings", async () => {
+  const ui = page(); await flush();
+  edit(ui, "thinking_notice_text", "长".repeat(1001));
+  ui.elements.get("settings-nav-budget").handlers.click();
+  await ui.elements.get("settings-form").handlers.submit({ preventDefault() {} });
+  assert.equal(ui.posts.length, 0);
+  assert.equal(ui.elements.get("setting-thinking_notice_text").value.length, 1001);
+  assert.match(ui.elements.get("notice").textContent, /群内思考提示内容最多 1000 字/);
+  assert.equal(vm.runInContext("selectedSettingsPanel", ui.sandbox), "rhythm");
+});
+
 test("invalid integer does not send a save or drop the draft", async () => {
   const ui = page();
   await flush();
@@ -502,7 +534,7 @@ test("overview separates captured dialogue, pending extraction and stored memory
   ui.view.schedule = { state: "budget", reason: "预计 20009 tokens，单次上限 20000 tokens", groups: [] };
   await vm.runInContext("loadState()", ui.sandbox);
   const detail = textOf(ui.elements.get("schedule-details"));
-  assert.match(detail, /运行版本：v2\.2\.1 \/ 页面 v2\.3\.0/);
+  assert.match(detail, /运行版本：v2\.2\.1 \/ 页面 v2\.3\.1/);
   assert.match(detail, /已采集原文：24/);
   assert.match(detail, /待整理对话：20/);
   assert.match(detail, /生效记忆：0/);
@@ -541,7 +573,7 @@ test("empty learning calls explain zero capture, paused and disabled learning wi
 test("legacy overview diagnostics remain unknown and translate active scheduler states", async () => {
   const ui = page(); await flush();
   const detail = textOf(ui.elements.get("schedule-details"));
-  assert.match(detail, /运行版本：未知 \/ 页面 v2\.3\.0/);
+  assert.match(detail, /运行版本：未知 \/ 页面 v2\.3\.1/);
   assert.match(detail, /已采集原文：—/);
   assert.match(detail, /待整理对话：—/);
   assert.match(detail, /待确认记忆：—/);

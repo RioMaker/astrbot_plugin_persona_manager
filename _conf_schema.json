@@ -286,7 +286,13 @@
     "type": "bool",
     "default": true,
     "description": "整理时显示思考提示",
-    "hint": "开始整理前向来源群发送一次简短思考提示，控制台同步显示思考状态。"
+    "hint": "开始整理前向来源群发送一次思考提示，内容可在下方修改；控制台同步显示思考状态。"
+  },
+  "thinking_notice_text": {
+    "type": "text",
+    "default": "正在思考，整理一下刚才的记忆……",
+    "description": "群内思考提示内容",
+    "hint": "开始整理记忆前发到来源群的固定文字，支持换行，最多1000字。留空或关闭思考提示时不发送；保存后下次整理生效。"
   },
   "event_salience_threshold": {
     "type": "float",

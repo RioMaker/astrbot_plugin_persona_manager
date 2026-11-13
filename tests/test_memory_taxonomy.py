@@ -368,7 +368,13 @@ def test_invalid_mtokens_are_rejected(value):
         validate_changes({}, {"memory_daily_mtokens": value})
 
 
-def test_runtime_threshold_thinking_json_retry_and_shared_group_batch(env, monkeypatch):
+@pytest.mark.parametrize(
+    "enabled,text,notice_count",
+    [(True, "正在整理", 1), (True, "", 0), (False, "正在整理", 0)],
+)
+def test_runtime_threshold_thinking_json_retry_and_shared_group_batch(
+    env, monkeypatch, enabled, text, notice_count
+):
     store, clock = env
     import astrbot_plugin_persona_manager.runtime as runtime_module
 
@@ -377,7 +383,8 @@ def test_runtime_threshold_thinking_json_retry_and_shared_group_batch(env, monke
         persona_id="cocoa",
         memory_batch_threshold=2,
         daily_group_token_limit=100000,
-        thinking_notice=True,
+        thinking_notice=enabled,
+        thinking_notice_text=text,
     )
     context = FakeContext()
     seen = []
@@ -394,7 +401,8 @@ def test_runtime_threshold_thinking_json_retry_and_shared_group_batch(env, monke
     assert not context.calls
     two = source(store, clock, "two", user="654321", content="我喜欢喝温水")
     asyncio.run(runtime.run_once())
-    assert len(context.calls) == len(seen) == 1
+    assert len(context.calls) == 1
+    assert len(seen) == notice_count
     assert runtime.thinking_scope is None
     assert store.profile("cocoa", one["user_id"])
     assert store.profile("cocoa", two["user_id"])

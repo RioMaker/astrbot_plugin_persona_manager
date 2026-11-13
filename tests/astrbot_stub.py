@@ -24,6 +24,15 @@ class Plain:
     text: str
 
 
+class MessageChain:
+    def __init__(self):
+        self.chain = []
+
+    def message(self, text):
+        self.chain.append(Plain(text))
+        return self
+
+
 @dataclass
 class At:
     qq: str
@@ -246,6 +255,7 @@ class MockContext:
             ),
         )
         self.routes = {}
+        self.send_message = AsyncMock(return_value=True)
         self.llm_generate = AsyncMock(
             return_value=SimpleNamespace(completion_text='{"proposals":[]}')
         )
@@ -344,6 +354,7 @@ def install(monkeypatch, data_path):
     event.filter = filters
     event.AstrMessageEvent = MockEvent
     event.MessageEventResult = SimpleNamespace
+    event.MessageChain = MessageChain
     star = module("astrbot.api.star")
     star.Context = MockContext
     star.Star = Star

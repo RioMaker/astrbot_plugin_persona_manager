@@ -6,6 +6,8 @@ from typing import Any, Mapping
 
 from .style_matching import parse_tag_entry
 
+TEXT_LIMITS = {"evolution_guidance": 4000, "thinking_notice_text": 1000}
+
 INT_LIMITS = {
     "memory_batch_threshold": (20, 1, 60),
     "short_cache_capacity": (30, 1, 1000),
@@ -61,6 +63,7 @@ class Settings:
     auto_dream: bool = True
     memory_default_enabled: bool = True
     thinking_notice: bool = True
+    thinking_notice_text: str = "正在思考，整理一下刚才的记忆……"
     event_salience_threshold: float = 0.7
     memory_daily_mtokens: float = 0.06
     memory_monthly_mtokens: float = 1.8
@@ -136,10 +139,10 @@ class Settings:
             values[name] = (
                 entries(raw) if isinstance(raw, list) else frozenset({"invalid"})
             )
-        guidance = config.get("evolution_guidance", "")
-        values["evolution_guidance"] = (
-            guidance[:4000].strip() if isinstance(guidance, str) else ""
-        )
+        for name, limit in TEXT_LIMITS.items():
+            default = getattr(cls, name)
+            value = config.get(name, default)
+            values[name] = value[:limit].strip() if isinstance(value, str) else default
         for name, (default, low, high) in INT_LIMITS.items():
             values[name] = integer(config.get(name, default), default, low, high)
         for name, default in (

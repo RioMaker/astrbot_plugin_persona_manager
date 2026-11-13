@@ -12,8 +12,10 @@ from astrbot_plugin_persona_manager.configuration import (
     usage_for_page,
     validate_changes,
 )
+from astrbot_plugin_persona_manager.ingress import sample
 from astrbot_plugin_persona_manager.settings import Settings
 from astrbot_plugin_persona_manager.tests import test_integration as integration
+from astrbot_plugin_persona_manager.tests.astrbot_stub import MockEvent
 
 entry = integration.entry
 route = integration.route
@@ -40,10 +42,15 @@ class SavedConfig(dict):
 def test_every_native_setting_has_a_dashboard_control():
     result = page_config({})
     assert set(result["values"]) == set(result["schema"]) == set(SCHEMA)
-    assert len(SCHEMA) == 49
+    assert len(SCHEMA) == 50
     assert all(field["section"] for field in result["schema"].values())
     assert "api_key" not in result["values"]
     assert result["schema"]["daily_token_limit"]["minimum"] == 0
+    assert result["schema"]["thinking_notice_text"]["maxLength"] == 1000
+    assert (
+        result["values"]["thinking_notice_text"]
+        == SCHEMA["thinking_notice_text"]["default"]
+    )
     assert revision({"observation_groups": ["456789", "234567"]}) == revision(
         {"observation_groups": ["234567", "456789"]}
     )
@@ -58,6 +65,9 @@ def test_every_native_setting_has_a_dashboard_control():
         {"daily_token_limit": -1},
         {"max_output_tokens": 999999},
         {"evolution_guidance": "长" * 4001},
+        {"thinking_notice_text": "长" * 1001},
+        {"thinking_notice_text": None},
+        {"thinking_notice_text": True},
         {"persona_id": ""},
         {"observation_groups": ["任意群"]},
         {"ignored_qq": ["qq:12345"]},
@@ -98,6 +108,7 @@ def test_page_save_persists_and_invalidates_inflight_work_without_touching_core(
                 "revision": revision(cfg),
                 "values": {
                     "evolution_guidance": "少复读，保留有证据的练习目标",
+                    "thinking_notice_text": "让我想一想～\n整理一下刚才的聊天。",
                     "daily_token_limit": 80000,
                     "cheap_learning_windows": ["23:00-07:00"],
                     "observation_groups": ["qq-main:234567"],
@@ -119,6 +130,16 @@ def test_page_save_persists_and_invalidates_inflight_work_without_touching_core(
                 "轻松",
             )
             assert env.plugin.settings().evolution_guidance.startswith("少复读")
+            text = "让我想一想～\n整理一下刚才的聊天。"
+            assert persisted["thinking_notice_text"] == text
+            source = sample(
+                MockEvent(group_id="456789"), env.plugin.settings(), "interaction"
+            )
+            await env.plugin._thinking_notice(source)
+            env.context.send_message.assert_awaited_once()
+            umo, chain = env.context.send_message.await_args.args
+            assert umo == "qq-main:GroupMessage:456789"
+            assert [item.text for item in chain.chain] == [text]
             assert env.plugin.store.epoch() > epoch
             assert env.context.persona_manager.updates == []
             assert Settings.read(persisted) == env.plugin.settings()
@@ -232,7 +253,7 @@ def test_state_exposes_settings_and_safe_selector_labels_only(entry):
             ]
             result = await route(env.context, "state")()
             assert result.status_code == 200
-            assert len(result["config"]["schema"]) == 49
+            assert len(result["config"]["schema"]) == 50
             assert result["choices"]["providers"] == [
                 {"id": "existing-model", "label": "existing-model"}
             ]

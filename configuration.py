@@ -8,7 +8,7 @@ from dataclasses import asdict
 from pathlib import Path
 
 from .scheduling import parse_window
-from .settings import INT_LIMITS, Settings
+from .settings import INT_LIMITS, TEXT_LIMITS, Settings
 from .style_matching import parse_tag_entry
 
 SCHEMA = json.loads(
@@ -22,6 +22,7 @@ SECTIONS = {
         "dream_hour",
         "auto_dream",
         "thinking_notice",
+        "thinking_notice_text",
         "event_salience_threshold",
     },
     "检索与表达": {
@@ -103,8 +104,8 @@ def page_config(config) -> dict:
                 maximum=1 if key == "event_salience_threshold" else 10000,
                 step=0.001,
             )
-        if key == "evolution_guidance":
-            field["maxLength"] = 4000
+        if key in TEXT_LIMITS:
+            field["maxLength"] = TEXT_LIMITS[key]
         schema[key] = field
     return {"values": values(config), "revision": revision(config), "schema": schema}
 
@@ -163,7 +164,7 @@ def validate_changes(current, changes) -> dict:
                 if any(not re.fullmatch(pattern, item) for item in value):
                     raise ValueError(f"{label}含无效QQ号或群号")
         elif kind in {"string", "text"}:
-            limit = 4000 if key == "evolution_guidance" else 200
+            limit = TEXT_LIMITS.get(key, 200)
             if not isinstance(value, str) or len(value) > limit:
                 raise ValueError(f"{label}须为不超过 {limit} 字的文本")
             value = value.strip()
