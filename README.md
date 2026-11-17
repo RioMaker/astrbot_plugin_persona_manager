@@ -1,6 +1,6 @@
 # 可可子人格管理 2.3.2
 
-<p align="center"><img src="logo.png" width="160" height="160" alt="可可子人格管理 Logo"></p>
+<p align="center"><img src="logo.png" width="160" height="160" alt="可可子 AI 伙伴 Logo：浅绿双马尾、彩虹皇冠和蓝色耳机，挥手打招呼"></p>
 
 固定核心人格，自动积累群内表达、同 QQ 跨群相处记忆与事件时间线。适配现有 `astrbot_plugin_access_gate`，只处理 OneBot/NapCat 的 QQ 群聊。
 
