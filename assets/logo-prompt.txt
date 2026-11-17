@@ -1,0 +1,9 @@
+Use case: logo-brand
+Asset type: production-ready square plugin logo for 可可子人格管理 (AstrBot Persona Manager).
+Primary request: Design ONE original, beautiful, minimal symbol expressing a consistent AI persona that learns and remembers through conversation. This is a warm group-chat companion and memory manager.
+Subject: a single integrated rounded speech-bubble emblem whose interior negative space elegantly suggests a human side-profile facing right. Use one small four-point memory spark near the forehead and a restrained layered contour to suggest accumulated memories. Merge these ideas into ONE coherent, immediately recognizable mark, not a collection of separate icons. The face silhouette must be graceful and abstract, not realistic and not a detailed character illustration.
+Style/medium: polished flat vector-like brand mark with precise smooth curves, substantial shapes, optical balance and clean negative space. Friendly, calm, quietly intelligent.
+Color palette: use the existing application colors, primary muted violet #6856AE and secondary light lavender #B3A0FA. Only these two solid colors plus transparent negative space. No gradients.
+Composition/framing: square 1024x1024 canvas, one centered isolated emblem occupying about 78 percent of the canvas, safe even margins, strong silhouette with important shapes readable at 48px. Transparent canvas outside and through the negative-space profile.
+Text: none. Do not render the plugin name, any letters or numbers.
+Constraints: genuinely transparent background; flat artwork, crisp smooth edges, no shadows, no glow, no texture, no 3D, no border or enclosing app tile, no mockup, no watermark, no multiple options or presentation sheet. Deliver a finished logo image.
