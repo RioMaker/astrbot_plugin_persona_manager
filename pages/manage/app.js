@@ -246,8 +246,8 @@ function renderCoreDirty() {
 const settingsLayout = [
   { id: "rhythm", title: "整理节奏", caption: "什么时候开始思考", description: "按群积累已回复的对话，达到门槛后批量整理；可修改发到群里的思考提示，整理仍受时段、间隔与预算约束。", fields: ["enabled", "learning_enabled", "persona_id", "memory_enabled", "memory_batch_threshold", "batch_size", "thinking_notice", "thinking_notice_text"] },
   { id: "lifecycle", title: "记忆生命周期", caption: "七类记忆如何留存", description: "短期按时间、入梦或容量清理；长期保留来源、证据与审核状态。", fields: ["short_cache_capacity", "auto_dream", "dream_hour", "knowledge_confirmations", "event_salience_threshold"] },
-  { id: "budget", title: "模型与预算", caption: "模型选择与用量上限", description: "记忆整理按输入与输出合计记账。1 Mtokens = 100 万 tokens；任一相关限额为 0 时停止模型整理。", fields: ["memory_daily_mtokens", "memory_monthly_mtokens", "learning_provider_id", "model_timeout_seconds", "max_output_tokens", "daily_calls", "daily_group_calls", "daily_token_limit", "daily_group_token_limit"] },
-  { id: "groups", title: "群与共享", caption: "哪些群可以学习、读取", description: "门禁负责放行；此处控制记忆与表达权限。每位用户统一存储记忆，各群是否读取公共记忆单独设置。", fields: ["memory_default_enabled", "observation_groups", "memory_groups", "memory_disabled_groups", "public_memory_groups", "global_style_groups", "group_tags", "ignored_qq"] },
+  { id: "budget", title: "模型与预算", caption: "模型选择与用量上限", description: "群聊和后台整理可分别选择模型。记忆整理按输入与输出合计记账，1 Mtokens = 100 万 tokens。", fields: ["local_chat_provider_id", "learning_provider_id", "memory_daily_mtokens", "memory_monthly_mtokens", "model_timeout_seconds", "max_output_tokens", "daily_calls", "daily_group_calls", "daily_token_limit", "daily_group_token_limit"] },
+  { id: "groups", title: "群与共享", caption: "各群模型、记忆与表达", description: "为门禁放行的群选择聊天模型，设置记忆与表达权限。每个群可单独开启公共记忆读取。", fields: ["local_chat_groups", "memory_default_enabled", "observation_groups", "memory_groups", "memory_disabled_groups", "public_memory_groups", "global_style_groups", "group_tags", "ignored_qq"] },
   { id: "expression", title: "表达与方向", caption: "怎么回忆、怎样表达", description: "调整聊天时的记忆与表达用量，设置成长方向；固定核心人设仍单独管理。", fields: ["evolution_guidance", "expression_per_turn", "expression_cooldown_seconds", "memory_context_chars", "expression_context_chars"] },
   { id: "advanced", title: "高级选项", caption: "学习时段与原文保留", description: "旁听积累、学习时段、原文长度与保留时间。互动记忆的数量门槛在“整理节奏”中设置。", fields: ["price_aware_learning", "learning_windows", "cheap_learning_windows", "min_observation_batch", "cheap_observation_batch", "learning_interval_seconds", "cheap_learning_interval_seconds", "max_learning_wait_seconds", "max_source_chars", "max_batch_chars", "max_context_chars", "observation_retention_hours", "interaction_retention_days", "regular_interaction_batch", "cheap_interaction_batch"] },
 ];
@@ -449,6 +449,7 @@ function renderGroupPicker() {
     memory: (configControls.get("memory_default_enabled")?.checked || groupMatches("memory_groups", group)) && !groupMatches("memory_disabled_groups", group),
     global: groupMatches("global_style_groups", group),
     public: groupMatches("public_memory_groups", group),
+    local: groupMatches("local_chat_groups", group),
   });
   const selectedCount = groups.filter((group) => Object.values(flags(group)).some(Boolean)).length;
   byId("group-count").textContent = `${groups.length} 个群 · 已选 ${selectedCount}`;
@@ -476,7 +477,13 @@ function renderGroupPicker() {
     const meta = node("p", `群号 ${group.group_id} · 连接 ${group.platform_id} · 机器人 ${group.bot_id}`, "muted small");
     const seen = node("p", `首次发现：${dateText(group.first_seen)} · 最近发现：${dateText(group.last_seen)}${counter(group.member_count) !== null ? ` · ${group.member_count} 人` : ""}`, "muted small");
     const toggles = node("div", "", "group-toggles");
-    for (const [kind, field, labelText] of [["observation", "observation_groups", "旁听学表达"], ["memory", "memory_groups", "互动记忆"], ["global", "global_style_groups", "允许使用跨群表达"], ["public", "public_memory_groups", "允许读取公共记忆"]]) {
+    for (const [kind, field, labelText] of [
+      ["observation", "observation_groups", "旁听学表达"],
+      ["memory", "memory_groups", "互动记忆"],
+      ["global", "global_style_groups", "允许使用跨群表达"],
+      ["public", "public_memory_groups", "允许读取公共记忆"],
+      ["local", "local_chat_groups", "文字群聊使用本地模型"],
+    ]) {
       const label = node("label", "", "group-toggle");
       const checkbox = node("input");
       checkbox.type = "checkbox";
@@ -640,7 +647,7 @@ function renderConfig({ replace = false } = {}) {
         if (schema.minimum !== undefined) control.min = schema.minimum;
         if (schema.maximum !== undefined) control.max = schema.maximum;
       }
-      const choices = name === "persona_id" ? array(state.choices?.personas) : name === "learning_provider_id" ? array(state.choices?.providers) : [];
+      const choices = schema._special === "select_persona" ? array(state.choices?.personas) : schema._special === "select_provider" ? array(state.choices?.providers) : [];
       if (choices.length) {
         const datalist = node("datalist");
         datalist.id = `choices-${name}`;
@@ -688,7 +695,7 @@ function renderConfig({ replace = false } = {}) {
     configControls.set(name, control);
     fieldsByName.set(name, field);
   }
-  const folded = new Set(["daily_calls", "daily_group_calls", "daily_token_limit", "daily_group_token_limit", "observation_groups", "memory_groups", "memory_disabled_groups", "global_style_groups", "group_tags", "public_memory_groups", "ignored_qq", "regular_interaction_batch", "cheap_interaction_batch"]);
+  const folded = new Set(["daily_calls", "daily_group_calls", "daily_token_limit", "daily_group_token_limit", "observation_groups", "local_chat_groups", "memory_groups", "memory_disabled_groups", "global_style_groups", "group_tags", "public_memory_groups", "ignored_qq", "regular_interaction_batch", "cheap_interaction_batch"]);
   for (const name of [...settingsLayout.flatMap((panel) => panel.fields), ...fieldsByName.keys()]) {
     const field = fieldsByName.get(name);
     if (!field) continue;
@@ -803,7 +810,7 @@ function renderOverview() {
   details.replaceChildren();
   const status = object(state.status);
   const capture = object(status.capture);
-  addMeta(details, "运行版本", `${status.runtime_version ? `v${status.runtime_version}` : "未知"} / 页面 v2.3.2`);
+  addMeta(details, "运行版本", `${status.runtime_version ? `v${status.runtime_version}` : "未知"} / 页面 v2.4.0`);
   addMeta(details, "已采集原文", countText(status.sources));
   addMeta(details, "待整理对话", countText(status.pending_interactions));
   addMeta(details, "生效记忆", countText(status.memories));

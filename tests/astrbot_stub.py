@@ -333,6 +333,7 @@ def install(monkeypatch, data_path):
     )
     for name in (
         "event_message_type",
+        "on_waiting_llm_request",
         "on_llm_request",
         "after_message_sent",
         "command",

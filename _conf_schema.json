@@ -59,6 +59,19 @@
     "default": true,
     "hint": "关闭后不新增样本、不调用学习模型；仍可使用已有记忆。管理页也可暂停学习。"
   },
+  "local_chat_provider_id": {
+    "type": "string",
+    "description": "群聊本地模型",
+    "default": "",
+    "_special": "select_provider",
+    "hint": "选择已在 AstrBot 启用的本地文本模型。在「群与共享」勾选试用群后，目标人格的普通文字聊天会使用它。留空使用原会话模型。"
+  },
+  "local_chat_groups": {
+    "type": "list",
+    "description": "使用本地模型的群",
+    "default": [],
+    "hint": "可在群列表勾选，也可填写群号或 平台实例ID:群号。空列表表示关闭。"
+  },
   "learning_provider_id": {
     "type": "string",
     "description": "后台学习模型",

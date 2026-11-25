@@ -1,0 +1,44 @@
+name: persona-local
+
+services:
+  persona-model:
+    image: ghcr.io/ggml-org/llama.cpp:server@sha256:6fab63852916c294cc8a2f1515079c4ca40248193eea8868ae742134335b989b
+    restart: unless-stopped
+    cpus: 2
+    ports:
+      - "127.0.0.1:${PERSONA_PORT:-18080}:8080"
+    volumes:
+      - type: bind
+        source: ${PERSONA_GGUF:?Set PERSONA_GGUF to the absolute path of your GGUF file}
+        target: /models/persona.gguf
+        read_only: true
+        bind:
+          create_host_path: false
+    command:
+      - --model
+      - /models/persona.gguf
+      - --alias
+      - persona-chat
+      - --host
+      - 0.0.0.0
+      - --port
+      - "8080"
+      - --threads
+      - "2"
+      - --threads-batch
+      - "2"
+      - --ctx-size
+      - "${PERSONA_CONTEXT:-4096}"
+      - --cache-ram
+      - "128"
+      - --parallel
+      - "1"
+      - --n-predict
+      - "128"
+      - --jinja
+      - --chat-template-kwargs
+      - '{"enable_thinking":false}'
+    logging:
+      options:
+        max-size: 5m
+        max-file: "2"

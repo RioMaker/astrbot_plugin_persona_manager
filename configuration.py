@@ -35,6 +35,7 @@ SECTIONS = {
         "enabled",
         "persona_id",
         "observation_groups",
+        "local_chat_groups",
         "global_style_groups",
         "group_tags",
         "memory_enabled",
@@ -47,6 +48,7 @@ SECTIONS = {
     "学习与模型": {
         "learning_enabled",
         "learning_provider_id",
+        "local_chat_provider_id",
         "batch_size",
         "model_timeout_seconds",
     },

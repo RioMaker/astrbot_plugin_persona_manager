@@ -42,7 +42,7 @@ class SavedConfig(dict):
 def test_every_native_setting_has_a_dashboard_control():
     result = page_config({})
     assert set(result["values"]) == set(result["schema"]) == set(SCHEMA)
-    assert len(SCHEMA) == 50
+    assert len(SCHEMA) == 52
     assert all(field["section"] for field in result["schema"].values())
     assert "api_key" not in result["values"]
     assert result["schema"]["daily_token_limit"]["minimum"] == 0
@@ -149,7 +149,14 @@ def test_page_save_persists_and_invalidates_inflight_work_without_touching_core(
 
 @pytest.mark.parametrize(
     "mode",
-    ["stale", "invalid", "unauthenticated", "unknown_provider", "unknown_persona"],
+    [
+        "stale",
+        "invalid",
+        "unauthenticated",
+        "learning_provider_id",
+        "local_chat_provider_id",
+        "unknown_persona",
+    ],
 )
 def test_page_save_rejection_leaves_config_untouched(entry, tmp_path, mode):
     async def run():
@@ -167,8 +174,8 @@ def test_page_save_rejection_leaves_config_untouched(entry, tmp_path, mode):
                 env.request.payload["values"] = {"daily_calls": -4}
             elif mode == "unauthenticated":
                 env.request.username = None
-            elif mode == "unknown_provider":
-                env.request.payload["values"] = {"learning_provider_id": "missing"}
+            elif mode in {"learning_provider_id", "local_chat_provider_id"}:
+                env.request.payload["values"] = {mode: "missing"}
             else:
                 env.request.payload["values"] = {"persona_id": "missing"}
             result = await route(env.context, "action")()
@@ -253,7 +260,7 @@ def test_state_exposes_settings_and_safe_selector_labels_only(entry):
             ]
             result = await route(env.context, "state")()
             assert result.status_code == 200
-            assert len(result["config"]["schema"]) == 50
+            assert len(result["config"]["schema"]) == 52
             assert result["choices"]["providers"] == [
                 {"id": "existing-model", "label": "existing-model"}
             ]

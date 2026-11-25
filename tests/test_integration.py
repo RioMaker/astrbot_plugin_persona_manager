@@ -674,6 +674,8 @@ def test_actual_gate_then_persona_preserves_routing_and_private_zero_cost(
             {
                 "observation_groups": ["234567", "456789"],
                 "memory_groups": ["234567", "456789"],
+                "local_chat_provider_id": "local/persona-chat",
+                "local_chat_groups": ["234567", "456789"],
             },
             context,
         ) as env:
@@ -686,6 +688,10 @@ def test_actual_gate_then_persona_preserves_routing_and_private_zero_cost(
                 event.message_str,
             )
             await env.plugin.observe(event)
+            await env.plugin.select_local_chat(event)
+            assert event.get_extra("selected_provider") == (
+                "local/persona-chat" if case == "chat" else None
+            )
             req = request()
             req.prompt = event.message_str
             # Default collect_initial_request caches this exact object before

@@ -24,6 +24,29 @@ def own_text(event: Any) -> str:
     ).strip()
 
 
+def is_text_chat(event: Any) -> bool:
+    text = own_text(event)
+    command_prefixes = ("/", "!", "！")
+    if (
+        not text
+        or text.startswith(command_prefixes)
+        or event.get_message_str().lstrip().startswith(command_prefixes)
+    ):
+        return False
+    for part in event.get_messages():
+        kind = type(part).__name__
+        if kind == "Reply":
+            # AstrBot can resolve an unexpanded quote to an image later.
+            quoted = getattr(part, "chain", None)
+            if not quoted or any(
+                type(p).__name__ not in {"Plain", "At"} for p in quoted
+            ):
+                return False
+        elif kind not in {"Plain", "At"}:
+            return False
+    return True
+
+
 def group_identity(event: Any, settings: Settings) -> dict[str, str] | None:
     if not settings.enabled or not settings.persona_id or event.is_stopped():
         return None

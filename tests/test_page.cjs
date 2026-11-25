@@ -382,6 +382,7 @@ test("all server configuration fields render with provider/persona suggestions",
   assert.equal(ui.elements.get("setting-evolution_guidance").tagName, "TEXTAREA");
   assert.ok(ui.elements.has("choices-persona_id"));
   assert.ok(ui.elements.has("choices-learning_provider_id"));
+  assert.ok(ui.elements.has("choices-local_chat_provider_id"));
   assert.equal(ui.elements.get("config-save").disabled, true);
 });
 
@@ -535,7 +536,7 @@ test("overview separates captured dialogue, pending extraction and stored memory
   ui.view.schedule = { state: "budget", reason: "预计 20009 tokens，单次上限 20000 tokens", groups: [] };
   await vm.runInContext("loadState()", ui.sandbox);
   const detail = textOf(ui.elements.get("schedule-details"));
-  assert.match(detail, /运行版本：v2\.2\.1 \/ 页面 v2\.3\.2/);
+  assert.match(detail, /运行版本：v2\.2\.1 \/ 页面 v2\.4\.0/);
   assert.match(detail, /已采集原文：24/);
   assert.match(detail, /待整理对话：20/);
   assert.match(detail, /生效记忆：0/);
@@ -574,7 +575,7 @@ test("empty learning calls explain zero capture, paused and disabled learning wi
 test("legacy overview diagnostics remain unknown and translate active scheduler states", async () => {
   const ui = page(); await flush();
   const detail = textOf(ui.elements.get("schedule-details"));
-  assert.match(detail, /运行版本：未知 \/ 页面 v2\.3\.2/);
+  assert.match(detail, /运行版本：未知 \/ 页面 v2\.4\.0/);
   assert.match(detail, /已采集原文：—/);
   assert.match(detail, /待整理对话：—/);
   assert.match(detail, /待确认记忆：—/);
@@ -637,13 +638,14 @@ test("group switches save independent native settings without typing IDs", async
   const ui = page(); await flush();
   ui.view.groups = [knownGroup(), knownGroup("qq-main", "456789", "另一个群")];
   await vm.runInContext("loadState()", ui.sandbox);
-  for (const key of ["group-observation-qq-main-234567", "group-memory-qq-main-456789"]) {
+  for (const key of ["group-observation-qq-main-234567", "group-memory-qq-main-456789", "group-local-qq-main-234567"]) {
     const control = ui.elements.get(key); control.checked = true; control.handlers.change();
   }
   await vm.runInContext("loadState()", ui.sandbox);
   assert.equal(ui.elements.get("group-memory-qq-main-456789").checked, true);
+  assert.equal(ui.elements.get("group-local-qq-main-234567").checked, true);
   await ui.elements.get("settings-form").handlers.submit({ preventDefault() {} });
-  assert.deepEqual(ui.posts[0].payload.values, {observation_groups:["qq-main:234567"], memory_groups:["qq-main:456789"]});
+  assert.deepEqual(ui.posts[0].payload.values, {observation_groups:["qq-main:234567"], memory_groups:["qq-main:456789"], local_chat_groups:["qq-main:234567"]});
 });
 
 test("disabling one connection preserves another connection and unrelated legacy IDs", async () => {

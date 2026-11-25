@@ -24,7 +24,7 @@ from .configuration import page_config, revision, usage_for_page, validate_chang
 from .delivery import confirmed_result_delivery, confirmed_tool_delivery
 from .dream_context import DreamContext
 from .groups import GroupDiscovery
-from .ingress import group_identity, own_text, sample
+from .ingress import group_identity, is_text_chat, own_text, sample
 from .memory_tools import MemoryTools
 from .runtime import CONTEXT_MARKER, Runtime
 from .settings import Settings
@@ -32,7 +32,7 @@ from .storage import Store
 from .temporal import BEIJING
 
 PLUGIN_NAME = "astrbot_plugin_persona_manager"
-PLUGIN_VERSION = "2.3.2"
+PLUGIN_VERSION = "2.4.0"
 GATE_NAME = "astrbot_plugin_access_gate"
 PENDING_KEY = PLUGIN_NAME + ":interaction"
 SENT_KEY = PLUGIN_NAME + ":sent"
@@ -415,6 +415,40 @@ class PersonaManagerPlugin(Star):
         except Exception:
             logger.warning("[可可子人格] 旁听跳过；未修改事件或其他插件状态。")
 
+    @filter.on_waiting_llm_request(priority=-100)
+    async def select_local_chat(self, event: AstrMessageEvent):
+        settings = self.settings()
+        if not settings.local_chat_provider_id or not settings.local_chat_groups:
+            return
+        try:
+            source = group_identity(event, settings)
+            if source is None or not settings.group_in(
+                source["group_id"], source["platform_id"], settings.local_chat_groups
+            ):
+                return
+            if (
+                event.call_llm
+                or event.get_extra("provider_request") is not None
+                or event.get_extra("selected_provider")
+                or event.get_extra("selected_model")
+                or event.get_extra("handlers_parsed_params", {})
+                or not self._gate_loaded(event)
+                or not is_text_chat(event)
+            ):
+                return
+            if event.get_extra(
+                "access_gate_original_text"
+            ) is None and not self._uses_native_wake(event):
+                return
+            source["umo"] = event.unified_msg_origin
+            if await self._source_allowed(source) and self.settings() == settings:
+                # The native runner resolves this event-scoped ID before building the request.
+                event.set_extra("selected_provider", settings.local_chat_provider_id)
+        except Exception:
+            logger.warning(
+                "[可可子人格] 无法核实本次群聊的本地模型选择，沿用会话设置。"
+            )
+
     @filter.on_llm_request(priority=-100)
     async def on_request(self, event: AstrMessageEvent, req: ProviderRequest):
         settings = self.settings()
@@ -766,10 +800,15 @@ class PersonaManagerPlugin(Star):
             )
             if persona is None:
                 raise ValueError("目标原生人格不存在，请先在 AstrBot 创建")
-        if "learning_provider_id" in changed and updated["learning_provider_id"]:
+        model_fields = {
+            "learning_provider_id",
+            "local_chat_provider_id",
+        } & changed.keys()
+        selected_ids = {updated[key] for key in model_fields if updated[key]}
+        if selected_ids:
             providers = (await self._page_choices())["providers"]
-            if updated["learning_provider_id"] not in {row["id"] for row in providers}:
-                raise ValueError("学习模型不存在或未启用，请选择已启用的对话模型")
+            if selected_ids - {row["id"] for row in providers}:
+                raise ValueError("模型不存在或未启用，请选择已启用的对话模型")
         # Persona/provider lookups may yield to a second Dashboard editor.
         if payload.get("revision") != revision(self.config):
             return error_response("配置已变化，请重新载入并核对草稿", status_code=409)

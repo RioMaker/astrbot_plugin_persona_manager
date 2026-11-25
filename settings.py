@@ -81,6 +81,8 @@ class Settings:
     memory_groups: frozenset[str] = field(default_factory=frozenset)
     memory_disabled_groups: frozenset[str] = field(default_factory=frozenset)
     ignored_qq: frozenset[str] = field(default_factory=frozenset)
+    local_chat_provider_id: str = ""
+    local_chat_groups: frozenset[str] = field(default_factory=frozenset)
     learning_enabled: bool = True
     learning_provider_id: str = ""
     batch_size: int = 30
@@ -121,11 +123,11 @@ class Settings:
         ):
             values[name] = config.get(name, True) is True
         values["persona_id"] = str(config.get("persona_id", "可可子") or "").strip()
-        values["learning_provider_id"] = str(
-            config.get("learning_provider_id", "") or ""
-        ).strip()
+        for name in ("learning_provider_id", "local_chat_provider_id"):
+            values[name] = str(config.get(name, "") or "").strip()
         for name in (
             "observation_groups",
+            "local_chat_groups",
             "global_style_groups",
             "group_tags",
             "memory_groups",
