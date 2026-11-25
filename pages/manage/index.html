@@ -5,7 +5,7 @@
     <meta name="viewport" content="width=device-width, initial-scale=1" />
     <meta name="color-scheme" content="light dark" />
     <title>可可子 · 人格管理</title>
-    <link rel="stylesheet" href="./style.css?v=2.8.1" />
+    <link rel="stylesheet" href="./style.css?v=2.9.0" />
   </head>
   <body>
     <main class="shell" id="app" aria-busy="true">
@@ -65,7 +65,7 @@
       </section>
 
       <section id="panel-simulation" aria-labelledby="simulation-title" hidden>
-        <div class="section-heading"><div><h2 id="simulation-title">模拟对话</h2><p class="muted">在这里和当前人格试聊。切换模型可继续各自的对话，重新打开页面会清空已完成的聊天记录。</p></div></div>
+        <div class="section-heading"><div><h2 id="simulation-title">模拟对话</h2><p class="muted">在这里和当前人格试聊。每个模型的两种模式各自保留本页对话。</p></div></div>
         <article class="card sim-card">
           <div class="sim-toolbar">
             <div class="field grow"><label for="sim-model">模拟模型</label><select id="sim-model" disabled></select></div>
@@ -74,6 +74,8 @@
               <button type="button" id="sim-clear" disabled>新对话</button>
             </div>
           </div>
+          <label class="sim-tool-toggle" for="sim-tools"><input type="checkbox" id="sim-tools" aria-describedby="sim-tools-note" disabled /> 启用群聊插件与 Skill</label>
+          <p id="sim-tools-note" class="field-hint">勾选后以虚拟群成员身份试聊。所选模型会收到 Skill 说明和可用工具，并可调用工具取得实际结果。</p>
           <p id="sim-resident" class="small" role="status"></p>
           <p id="sim-model-note" class="field-hint"></p>
           <div id="sim-messages" class="sim-messages" aria-label="模拟消息"></div>
@@ -230,6 +232,6 @@
       <div id="memory-detail-fields"></div><p id="memory-detail-error" class="field-error" role="alert"></p>
       <div class="dialog-actions"><button id="memory-detail-cancel" type="button">取消</button><button type="submit" class="primary">保存修改</button></div>
     </form></dialog>
-    <script type="module" src="./app.js?v=2.8.1"></script>
+    <script type="module" src="./app.js?v=2.9.0"></script>
   </body>
 </html>

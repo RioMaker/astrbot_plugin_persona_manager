@@ -34,12 +34,12 @@ from .ingress import group_identity, is_text_chat, own_text, sample
 from .memory_tools import MemoryTools
 from .runtime import CONTEXT_MARKER, Runtime
 from .settings import Settings
-from .simulation import Simulation, SimulationBusy, chat_messages
+from .simulation import SEED_SOURCE, Simulation, SimulationBusy, chat_messages
 from .storage import Store
 from .temporal import BEIJING
 
 PLUGIN_NAME = "astrbot_plugin_persona_manager"
-PLUGIN_VERSION = "2.8.1"
+PLUGIN_VERSION = "2.9.0"
 GATE_NAME = "astrbot_plugin_access_gate"
 PENDING_KEY = PLUGIN_NAME + ":interaction"
 SENT_KEY = PLUGIN_NAME + ":sent"
@@ -991,6 +991,7 @@ class PersonaManagerPlugin(Star):
                     action,
                     payload.get("model"),
                     self.settings(),
+                    enable_tools=payload.get("enable_tools", False),
                 )
                 return json_response(self.simulation.state(owner))
             if action in ("poll", "cancel"):
@@ -1018,7 +1019,7 @@ class PersonaManagerPlugin(Star):
                 core = (Path(__file__).parent / "persona_seed.txt").read_text(
                     encoding="utf-8"
                 )
-                source = "推荐人格底稿"
+                source = SEED_SOURCE
             return json_response(
                 self.simulation.start(
                     owner,
@@ -1028,6 +1029,8 @@ class PersonaManagerPlugin(Star):
                     core,
                     source,
                     self.settings(),
+                    enable_tools=payload.get("enable_tools", False),
+                    session_id=payload.get("session_id"),
                 )
             )
         except SimulationBusy as exc:

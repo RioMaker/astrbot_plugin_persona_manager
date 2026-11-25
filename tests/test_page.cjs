@@ -213,6 +213,54 @@ test("simulation keeps independent multi-turn chats when switching between 2B an
   assert.ok(ui.posts.every(p => p.endpoint === "simulation"));
 });
 
+test("plugin mode separates history, reuses its virtual group and resets it on new chat", async () => {
+  const ui = page({simulation: p => ({
+    ...p, id: "turn", question: p.message, answer: "收到", status: "done",
+    session_id: p.enable_tools ? "virtual-group" : null,
+    tool_calls: p.enable_tools ? ["lookup"] : [],
+  })});
+  await flush();
+  const el = id => ui.elements.get(id);
+  const toggle = on => { el("sim-tools").checked = on; el("sim-tools").handlers.change(); };
+  const send = async message => {
+    el("sim-input").value = message;
+    await el("sim-form").handlers.submit({preventDefault(){}});
+    return ui.posts.at(-1).payload;
+  };
+  assert.equal((await send("普通消息")).enable_tools, false);
+  toggle(true);
+  const first = await send("查询");
+  assert.equal(first.enable_tools, true);
+  assert.deepEqual(first.history, []);
+  assert.equal(first.session_id, undefined);
+  assert.match(textOf(el("sim-messages")), /调用工具 · lookup/);
+  toggle(false);
+  assert.doesNotMatch(textOf(el("sim-messages")), /lookup|查询/);
+  assert.equal((await send("接普通消息")).history[0].content, "普通消息");
+  toggle(true);
+  const second = await send("接工具消息");
+  assert.deepEqual(second.history, [{role:"user",content:"查询"}, {role:"assistant",content:"收到"}]);
+  assert.equal(second.session_id, "virtual-group");
+  el("sim-clear").handlers.click();
+  const fresh = await send("另开一组");
+  assert.deepEqual(fresh.history, []);
+  assert.equal(fresh.session_id, undefined);
+});
+
+test("recovering an in-flight plugin chat restores and locks its checkbox", async () => {
+  const job = {id:"j", model:"Qwen3-8B", persona:"可可子", question:"调用", status:"running", enable_tools:true, session_id:"sid"};
+  const ui = page({simulation: p => p.action === "active"
+    ? {job, busy:true} : {...job, status:"done", answer:"好", tool_calls:["lookup"]}});
+  await flush();
+  await vm.runInContext("recoverSim(true)", ui.sandbox);
+  const el = id => ui.elements.get(id);
+  assert.equal(el("sim-tools").checked, true);
+  assert.equal(el("sim-tools").disabled, true);
+  await [...ui.timers.values()][0]();
+  assert.equal(el("sim-tools").disabled, false);
+  assert.match(textOf(el("sim-messages")), /lookup/);
+});
+
 test("manual load and release update residency without changing the draft or chat", async () => {
   const simulate = simulateModels();
   const ui = page({simulation: payload => {
@@ -828,7 +876,7 @@ test("overview separates captured dialogue, pending extraction and stored memory
   ui.view.schedule = { state: "budget", reason: "预计 20009 tokens，单次上限 20000 tokens", groups: [] };
   await vm.runInContext("loadState()", ui.sandbox);
   const detail = textOf(ui.elements.get("schedule-details"));
-  assert.match(detail, /运行版本：v2\.2\.1 \/ 页面 v2\.8\.1/);
+  assert.match(detail, /运行版本：v2\.2\.1 \/ 页面 v2\.9\.0/);
   assert.match(detail, /已采集原文：24/);
   assert.match(detail, /待整理对话：20/);
   assert.match(detail, /生效记忆：0/);
@@ -867,7 +915,7 @@ test("empty learning calls explain zero capture, paused and disabled learning wi
 test("legacy overview diagnostics remain unknown and translate active scheduler states", async () => {
   const ui = page(); await flush();
   const detail = textOf(ui.elements.get("schedule-details"));
-  assert.match(detail, /运行版本：未知 \/ 页面 v2\.8\.1/);
+  assert.match(detail, /运行版本：未知 \/ 页面 v2\.9\.0/);
   assert.match(detail, /已采集原文：—/);
   assert.match(detail, /待整理对话：—/);
   assert.match(detail, /待确认记忆：—/);

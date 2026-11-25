@@ -2,7 +2,9 @@
 
 import asyncio
 import json
+import logging
 import os
+import re
 import secrets
 import sys
 import tempfile
@@ -19,10 +21,17 @@ from .simulation_models import MODELS, ModelFiles
 MAX_ROUNDS = 6
 MAX_OUTPUT = 160
 CONFIGURED = "configured"
+SEED_SOURCE = "推荐人格底稿"
+LOCAL_CONTEXT = 4096
+LOCAL_TOOL_CONTEXT = 16384
 
 
 class SimulationBusy(ValueError):
     pass
+
+
+class SimulationToolError(ValueError):
+    """An actionable tool-mode error that is safe to display on the dashboard."""
 
 
 def chat_messages(payload):
@@ -58,6 +67,9 @@ class Job:
     persona: str = ""
     prompt_source: str = ""
     operation: str = "send"
+    enable_tools: bool = False
+    session_id: str | None = None
+    tool_calls: list[str] = field(default_factory=list)
     id: str = field(default_factory=lambda: secrets.token_hex(16))
     status: str = "running"
     detail: str = "准备模拟对话"
@@ -100,6 +112,9 @@ class Job:
             "id": self.id,
             "model": self.model,
             "operation": self.operation,
+            "enable_tools": self.enable_tools,
+            "session_id": self.session_id,
+            "tool_calls": list(self.tool_calls),
             "loaded_model": loaded_model,
             "persona": self.persona,
             "question": self.question,
@@ -117,6 +132,7 @@ class ResidentEngine:
     process: asyncio.subprocess.Process
     client: aiohttp.ClientSession
     resources: AsyncExitStack
+    context_size: int = LOCAL_CONTEXT
 
 
 class Simulation:
@@ -189,7 +205,9 @@ class Simulation:
             raise ValueError("模拟任务已过期或不存在")
         return job
 
-    def _check_available(self, model, settings):
+    def _check_available(self, model, settings, enable_tools):
+        if not isinstance(enable_tools, bool):
+            raise ValueError("插件能力开关必须是布尔值")
         choice = next(
             (item for item in self.models(settings) if item["id"] == model), None
         )
@@ -199,19 +217,49 @@ class Simulation:
             raise SimulationBusy("模拟引擎正在处理另一个请求，请稍后重试")
         return choice
 
-    def start(self, owner, model, messages, persona, system, source, settings):
-        choice = self._check_available(model, settings)
+    def start(
+        self,
+        owner,
+        model,
+        messages,
+        persona,
+        system,
+        source,
+        settings,
+        *,
+        enable_tools=False,
+        session_id=None,
+    ):
+        choice = self._check_available(model, settings, enable_tools)
         if reason := choice.get("unavailable_reason"):
             raise ValueError(reason)
-        job = Job(owner, model, messages[-1]["content"], persona, source)
+        if session_id is not None and (
+            not isinstance(session_id, str)
+            or not re.fullmatch(r"[0-9a-f]{32}", session_id)
+        ):
+            raise ValueError("模拟会话标识无效")
+        job = Job(
+            owner,
+            model,
+            messages[-1]["content"],
+            persona,
+            source,
+            enable_tools=enable_tools,
+            session_id=(session_id or secrets.token_hex(16)) if enable_tools else None,
+        )
         self._submit(job, messages, system, settings.local_chat_provider_id)
         return job.view(self.loaded_model)
 
-    def manage(self, owner, action, model, settings):
-        self._check_available(model, settings)
+    def _resident_for(self, model, enable_tools):
+        return self.loaded_model == model and (
+            not enable_tools or self.engine.context_size >= LOCAL_TOOL_CONTEXT
+        )
+
+    def manage(self, owner, action, model, settings, *, enable_tools=False):
+        self._check_available(model, settings, enable_tools)
         loaded = self.loaded_model
         if action == "select":
-            if not loaded or loaded == model:
+            if not loaded:
                 return
             action = "load" if model in MODELS else "unload"
         elif model not in MODELS:
@@ -219,12 +267,16 @@ class Simulation:
         elif action == "unload" and loaded and loaded != model:
             raise SimulationBusy("驻留模型已变更，请核对当前模型后再释放")
 
-        if (action == "load" and loaded == model) or (
+        if (action == "load" and self._resident_for(model, enable_tools)) or (
             action == "unload" and self.engine is None
         ):
             return
         detail = "准备释放本地模型" if action == "unload" else f"准备加载 {model}"
-        self._submit(Job(owner, model, operation=action, detail=detail))
+        self._submit(
+            Job(
+                owner, model, operation=action, detail=detail, enable_tools=enable_tools
+            )
+        )
 
     def _submit(self, job, messages=(), system="", provider=""):
         now = time.monotonic()
@@ -247,7 +299,8 @@ class Simulation:
         self.active = None
 
     async def _load(self, job):
-        if self.loaded_model == job.model:
+        context_size = LOCAL_TOOL_CONTEXT if job.enable_tools else LOCAL_CONTEXT
+        if self._resident_for(job.model, job.enable_tools):
             job.load_mode = "resident"
             return self.engine
         job.load_mode = "cold"
@@ -256,7 +309,7 @@ class Simulation:
         binary, weights = await self.files.prepare(job.model, job.progress)
         job.load_started = time.monotonic()
         job.progress(f"正在加载 {job.model}")
-        self.engine = await _open_engine(job.model, binary, weights)
+        self.engine = await _open_engine(job.model, binary, weights, context_size)
         job.ready_at = time.monotonic()
         return self.engine
 
@@ -276,11 +329,56 @@ class Simulation:
         finally:
             self.engine = None
 
+    async def _group_reply(self, job, messages, system, provider_id):
+        try:
+            from .simulation_agent import group_reply
+        except ImportError as exc:
+            raise SimulationToolError(
+                "无法加载 AstrBot 群聊 Agent，请检查框架版本和依赖"
+            ) from exc
+
+        engine = None
+        if job.model in MODELS:
+            engine = await self._load(job)
+        else:
+            await self._release(job)
+        job.progress("正在准备群聊插件与 Skill")
+        try:
+            return await asyncio.wait_for(
+                group_reply(
+                    self.context,
+                    self.config,
+                    job,
+                    messages,
+                    system,
+                    provider_id,
+                    engine,
+                ),
+                timeout=360,
+            )
+        except asyncio.TimeoutError:
+            raise SimulationToolError(
+                "群聊模拟超时，请缩短问题或检查耗时的工具"
+            ) from None
+        except SimulationToolError:
+            raise
+        except Exception as exc:
+            status = getattr(exc, "status_code", None)
+            reason = f"HTTP {status}" if isinstance(status, int) else type(exc).__name__
+            logging.getLogger("astrbot").warning(
+                "[可可子人格] %s 群聊模拟调用失败（%s）", job.model, reason
+            )
+            raise SimulationToolError(
+                f"群聊能力调用失败（{reason}），请检查模型服务、工具调用支持和上下文长度"
+            ) from exc
+
     async def _run(self, job, messages, system, provider):
         try:
             if job.operation == "unload":
                 await self._release(job)
                 job.detail = "本地模型已释放"
+            elif job.enable_tools and job.operation == "send":
+                job.answer = await self._group_reply(job, messages, system, provider)
             elif job.model.startswith("bailian:"):
                 await self._release(job)
                 job.progress("正在等待阿里云百炼回复")
@@ -326,6 +424,8 @@ class Simulation:
             job.status = "done"
         except asyncio.CancelledError:
             job.status, job.detail = "cancelled", "已停止"
+        except SimulationToolError as exc:
+            job.status, job.detail = "error", str(exc)
         except ValueError as exc:
             job.status, job.detail = (
                 "error",
@@ -361,7 +461,7 @@ class Simulation:
         self.jobs.clear()
 
 
-async def _open_engine(model, binary, weights):
+async def _open_engine(model, binary, weights, context_size):
     binary, weights = binary.resolve(), weights.resolve()
     async with AsyncExitStack() as resources:
         run_dir = resources.enter_context(
@@ -380,6 +480,8 @@ async def _open_engine(model, binary, weights):
                 str(binary),
                 "--model",
                 str(weights),
+                "--alias",
+                model,
                 "--host",
                 str(socket),
                 "--threads",
@@ -387,7 +489,7 @@ async def _open_engine(model, binary, weights):
                 "--threads-batch",
                 "2",
                 "--ctx-size",
-                "4096",
+                str(context_size),
                 "--parallel",
                 "1",
                 "--sleep-idle-seconds",
@@ -429,7 +531,7 @@ async def _open_engine(model, binary, weights):
             await asyncio.sleep(0.3)
         else:
             raise ValueError("加载模型超时，请检查服务器内存及 CPU 占用")
-        return ResidentEngine(model, proc, client, resources.pop_all())
+        return ResidentEngine(model, proc, client, resources.pop_all(), context_size)
 
 
 @asynccontextmanager
@@ -471,7 +573,9 @@ async def _stream(client, system, messages, job):
                     if len(messages) > 1:
                         messages = messages[2:]
                         continue
-                    raise ValueError("当前人设和消息超过 4096 tokens，请缩短后重试")
+                    raise ValueError(
+                        "当前人设和消息超过本地模型的上下文窗口，请缩短后重试"
+                    )
                 raise ValueError(f"本地引擎返回 HTTP {response.status}")
             async for line in response.content:
                 if not line.startswith(b"data:"):

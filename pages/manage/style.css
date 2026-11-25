@@ -37,6 +37,9 @@
 .sim-toolbar, .sim-composer { display: flex; gap: 14px; align-items: flex-end; }
 .sim-toolbar { flex-wrap: wrap; }
 .sim-toolbar .field { flex-basis: 230px; }
+.sim-tool-toggle { display: inline-flex; align-items: center; gap: 8px; margin-top: 14px; cursor: pointer; }
+.sim-tool-toggle input { width: 18px; height: 18px; min-height: 0; margin: 0; accent-color: var(--accent); }
+#sim-tools-note { margin: 4px 0; }
 #sim-resident { margin: 12px 0 0; }
 #sim-model-note { margin: 3px 0 14px; }
 .sim-messages { display: flex; flex-direction: column; gap: 12px; min-height: 160px; max-height: 48vh; overflow: auto; border-block: 1px solid var(--line); padding: 14px 0; }

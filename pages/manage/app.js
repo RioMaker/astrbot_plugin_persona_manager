@@ -23,6 +23,7 @@ const configSliders = new Map();
 const settingsPanels = new Map();
 let selectedSettingsPanel = "rhythm";
 const simChats = new Map();
+const simSessions = new Map();
 let simJob = null;
 let simKey = "";
 let simTimer = null;
@@ -834,7 +835,7 @@ function renderOverview() {
   details.replaceChildren();
   const status = object(state.status);
   const capture = object(status.capture);
-  addMeta(details, "运行版本", `${status.runtime_version ? `v${status.runtime_version}` : "未知"} / 页面 v2.8.1`);
+  addMeta(details, "运行版本", `${status.runtime_version ? `v${status.runtime_version}` : "未知"} / 页面 v2.9.0`);
   addMeta(details, "已采集原文", countText(status.sources));
   addMeta(details, "待整理对话", countText(status.pending_interactions));
   addMeta(details, "生效记忆", countText(status.memories));
@@ -1249,8 +1250,8 @@ async function forgetMemory(memory) {
   if (confirmed) await perform(() => action("memory_forget", { memory_id: recordId(memory) }), "已忘记这条记忆。");
 }
 
-function simThread(model = byId("sim-model").value, persona = selectedPersona) {
-  return JSON.stringify([persona, model, model === "configured" ? state?.config?.values?.local_chat_provider_id : ""]);
+function simThread(model = byId("sim-model").value, persona = selectedPersona, tools = byId("sim-tools").checked) {
+  return JSON.stringify([persona, model, model === "configured" ? state?.config?.values?.local_chat_provider_id : "", tools]);
 }
 
 function simModel(id = byId("sim-model").value) {
@@ -1280,6 +1281,7 @@ function simControls() {
   const choice = simModel(model);
   const local = choice?.kind === "local";
   byId("sim-model").disabled = blocked;
+  byId("sim-tools").disabled = blocked || !model;
   const engineButton = byId("sim-engine");
   engineButton.hidden = !local;
   engineButton.disabled = blocked || !local;
@@ -1287,7 +1289,7 @@ function simControls() {
   engineButton.title = simLoaded ? `释放 ${simLoaded}` : `加载 ${model}`;
   byId("sim-input").disabled = blocked || !model;
   byId("sim-send").disabled = byId("sim-input").disabled || Boolean(choice?.unavailable_reason) || !byId("sim-input").value.trim();
-  byId("sim-clear").disabled = blocked || !simChats.get(simThread())?.length;
+  byId("sim-clear").disabled = blocked || (!simChats.get(simThread())?.length && !simSessions.has(simThread()));
   byId("sim-stop").hidden = !simJob?.id || simJob.operation === "unload";
   byId("sim-stop").disabled = byId("sim-stop").hidden || simWaiting;
 }
@@ -1314,6 +1316,7 @@ function renderSim() {
   for (const turn of turns) {
     const row = node("div", "", `sim-message ${turn.role}`);
     row.append(node("strong", turn.role === "user" ? "你" : selectedPersona), node("p", turn.content));
+    if (turn.tools) row.append(node("small", turn.tools.length ? `调用工具 · ${turn.tools.join("、")}` : "本轮未调用工具", "sim-timing"));
     if (turn.timing) row.append(node("small", simTiming(turn.timing), "sim-timing"));
     list.append(row);
   }
@@ -1341,6 +1344,10 @@ function acceptSim(job) {
   simJob = job;
   if ("loaded_model" in job) simLoaded = job.loaded_model;
   const isChat = (job.operation || "send") === "send";
+  if (isChat && job.enable_tools && job.session_id) {
+    if (simSessions.has(simKey) && simSessions.get(simKey) !== job.session_id) simChats.delete(simKey);
+    simSessions.set(simKey, job.session_id);
+  }
   if (job.status === "running") {
     if (simTimer !== null) window.clearTimeout(simTimer);
     const pollDelay = isChat && simLoaded === job.model ? 300 : 900;
@@ -1350,12 +1357,16 @@ function acceptSim(job) {
     simTimer = null;
     if (isChat && job.status === "done" && job.answer?.trim()) {
       const turns = simChats.get(simKey) || [];
-      turns.push({role: "user", content: job.question}, {role: "assistant", content: job.answer.trim(), timing: job.timing});
+      turns.push({role: "user", content: job.question}, {
+        role: "assistant", content: job.answer.trim(), timing: job.timing,
+        tools: job.enable_tools ? array(job.tool_calls) : null,
+      });
       simChats.set(simKey, turns.slice(-60));
       simNotice = `已使用${job.prompt_source}，本轮由 ${simModel(job.model)?.label || job.model} 回复。`;
     } else {
       if (isChat && simKey === simThread()) byId("sim-input").value = job.question;
-      simNotice = [job.detail || "操作结束", simTiming(job.timing)].filter(Boolean).join(" · ");
+      const calls = array(job.tool_calls);
+      simNotice = [job.detail || "操作结束", calls.length ? `本轮调用过 ${calls.join("、")}` : "", simTiming(job.timing)].filter(Boolean).join(" · ");
     }
     simJob = null;
   }
@@ -1391,6 +1402,7 @@ async function recoverSim(resume = false) {
     if (resume && job) {
       simOtherBusy = false;
       byId("sim-model").value = job.model;
+      if ((job.operation || "send") === "send") byId("sim-tools").checked = Boolean(job.enable_tools);
       simKey = simThread(job.model, job.persona);
       acceptSim(job);
     } else if (resume && simLoaded) {
@@ -1414,7 +1426,7 @@ async function manageSim(action) {
   simNotice = "";
   renderSim();
   try {
-    const status = await bridge.apiPost("simulation", {action, model});
+    const status = await bridge.apiPost("simulation", {action, model, enable_tools: byId("sim-tools").checked});
     simLoaded = status.loaded_model || null;
     simOtherBusy = Boolean(status.busy && !status.job);
     if (status.job) acceptSim(status.job);
@@ -1433,14 +1445,20 @@ byId("sim-form").addEventListener("submit", async (event) => {
   if (!ready || busy || simJob || simWaiting || simOtherBusy || !message || !model || simModel(model)?.unavailable_reason) return;
   ++simEpoch;
   simKey = simThread();
-  const history = (simChats.get(simKey) || []).slice(-12).map(({role, content}) => ({role, content}));
+  const history = (simChats.get(simKey) || []).slice(-12).map(({role, content}) => ({
+    role, content: role === "assistant" ? Array.from(content).slice(0, 4000).join("") : content,
+  }));
+  const enableTools = byId("sim-tools").checked;
   simJob = {model, question: message, detail: "正在提交…"};
   simWaiting = true;
   simNotice = "";
   input.value = "";
   renderSim();
   try {
-    acceptSim(await bridge.apiPost("simulation", {action: "send", model, message, history, persona_id: selectedPersona}));
+    acceptSim(await bridge.apiPost("simulation", {
+      action: "send", model, message, history, persona_id: selectedPersona,
+      enable_tools: enableTools, session_id: enableTools ? simSessions.get(simKey) : undefined,
+    }));
   } catch (error) {
     simJob = null;
     input.value = message;
@@ -1451,11 +1469,13 @@ byId("sim-form").addEventListener("submit", async (event) => {
   }
 });
 byId("sim-input").addEventListener("input", simControls);
+byId("sim-tools").addEventListener("change", () => { simNotice = ""; renderSim(); });
 byId("sim-model").addEventListener("change", () => manageSim("select"));
 byId("sim-engine").addEventListener("click", () => manageSim(simLoaded ? "unload" : "load"));
 byId("sim-clear").addEventListener("click", () => {
   if (simJob || simWaiting) return;
   simChats.delete(simThread());
+  simSessions.delete(simThread());
   byId("sim-input").value = "";
   simNotice = "";
   renderSim();

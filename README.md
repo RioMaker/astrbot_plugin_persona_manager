@@ -1,4 +1,4 @@
-# 可可子人格管理 2.8.1
+# 可可子人格管理 2.9.0
 
 <p align="center"><img src="logo.png" width="160" height="160" alt="可可子 AI 伙伴 Logo：浅绿双马尾、彩虹皇冠和蓝色耳机，挥手打招呼"></p>
 
@@ -23,7 +23,15 @@
 
 引擎使用 2 个 CPU 线程，一次运行一档。权重缓存于 `data/plugin_data/astrbot_plugin_persona_manager/simulation/`，手动释放后仍可复用。后续使用微调版本时，可在“模型与预算”选好群聊本地模型，再在模拟页选择“自定义模型”进行对照。自定义提供商管理自己的进程。
 
-每档模型各自保留当前页面的对话，发送最近六轮作为上下文。“新对话”清空当前模型的试聊历史。默认使用已保存的目标人格，缺少原生人格时使用插件推荐底稿。试聊不发送 QQ 消息、不开放群聊工具，也不写入群记忆或学习队列。[2B 量化权重](https://huggingface.co/unsloth/Qwen3.5-2B-GGUF/blob/main/Qwen3.5-2B-Q4_K_M.gguf) · [8B 量化权重](https://huggingface.co/Qwen/Qwen3-8B-GGUF/blob/main/Qwen3-8B-Q4_K_M.gguf)
+默认发送已保存的人格和最近六轮试聊。缺少原生人格时使用推荐底稿。[2B 量化权重](https://huggingface.co/unsloth/Qwen3.5-2B-GGUF/blob/main/Qwen3.5-2B-Q4_K_M.gguf) · [8B 量化权重](https://huggingface.co/Qwen/Qwen3-8B-GGUF/blob/main/Qwen3-8B-Q4_K_M.gguf)
+
+### 在试聊中调用插件与 Skill
+
+在模拟模型下方勾选 **启用群聊插件与 Skill**。本地、百炼和自定义模型都可使用这个开关。AstrBot 将本轮视为已唤醒的虚拟群聊，载入当前人格的开场对话、Skill 说明和可用工具，并运行插件的模型请求钩子。模型主动请求工具时，AstrBot 实际执行调用，再把结果交给同一个模型继续回复。回复下方显示本轮调用过的工具名。
+
+虚拟发言者具有普通群成员身份。依赖真实 QQ 群号、群白名单或 OneBot 接口的功能仍取决于插件自身的要求。对当前模拟事件的回复显示在管理页，试聊消息不会进入本插件的群记忆采集队列。工具访问外部服务、修改其自身数据或消耗模型额度时会实际生效。Skill 的文件读取与运行权限沿用 AstrBot 的运行环境设置。
+
+两个模式按模型和人格独立保留本页历史。切回原模式可接着聊，点击 **新对话** 会清空当前模式的记录，并在下次工具试聊时分配新的虚拟群。本地模型首次启用工具时会按需重新加载，将上下文窗口从 4,096 扩至 16,384 tokens 以容纳工具定义和 Skill 说明。百炼和自定义提供商需要所选模型支持函数调用。[AstrBot 人格能力与插件](https://docs.astrbot.app/use/plugin.html) · [AstrBot Skills](https://docs.astrbot.app/use/skills.html) · [百炼工具调用](https://help.aliyun.com/zh/model-studio/qwen-function-calling)
 
 ## 工作逻辑
 
@@ -261,6 +269,8 @@ node --check pages/manage/app.js
 ```
 
 测试使用真实 SQLite、确定性时间和本地模型替身，覆盖群/私聊边界、路由位保留、同 QQ 跨群、旁听与个人记忆隔离、历史迟到、计划状态、来源验证、并发预算、暂停/遗忘/白名单撤回时的在途结果、管理认证及版本归属。入口测试仅在 fixture 中安装 AstrBot 替身，不是运行完整 AstrBot。
+
+安装 AstrBot 后，`tests/test_simulation_agent.py` 还会调用真实的群聊 Agent、Skill 加载和工具执行器，用确定性的模型 HTTP 回包验证工具结果能到达下一次请求。未安装框架时，这组集成用例会明确标记跳过。
 
 工作区组合测试导入现有 Access Gate 处理函数，并执行六爻、五行的实际工具过滤函数，核对指令路由、私聊绑定入口与隐藏工具保持不变。单独克隆本插件且没有这些同级仓库时，对应组合测试会明确标记跳过；不能据此宣称通过组合验证。新增回归覆盖跨午夜价段、最长积累、配置冲突、方向变更、真实/缺失用量、预算退款及重启保留。管理页 Node 测试覆盖全部配置、草稿、失败/冲突处理、用量展示和原有纠错流程。
 

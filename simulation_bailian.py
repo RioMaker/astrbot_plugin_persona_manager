@@ -17,11 +17,15 @@ def api_key(config):
     )
 
 
-async def generate(workspace, model_code, system, messages, max_tokens, key):
+def validate_key(key):
     if not key:
         raise ValueError(MISSING_KEY)
     if not BAILIAN_KEY_FORMAT.fullmatch(key):
         raise ValueError("百炼试聊 API Key 格式无效，请检查插件密钥配置")
+
+
+async def generate(workspace, model_code, system, messages, max_tokens, key):
+    validate_key(key)
     url = (
         f"https://{workspace}.cn-beijing.maas.aliyuncs.com"
         "/api/v1/services/aigc/text-generation/generation"

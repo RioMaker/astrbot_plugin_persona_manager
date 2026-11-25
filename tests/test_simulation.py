@@ -49,12 +49,14 @@ subprocess.run([sys.executable, "-I", sys.argv[1], str(os.getpid()), sys.executa
 def native_engines(monkeypatch):
     engines = []
 
-    async def open_engine(model, binary, weights):
+    async def open_engine(model, binary, weights, context_size):
         assert all(engine.process.returncode is not None for engine in engines)
         process = SimpleNamespace(returncode=None)
         stack = AsyncExitStack()
         stack.callback(setattr, process, "returncode", 0)
-        engine = simulation.ResidentEngine(model, process, object(), stack)
+        engine = simulation.ResidentEngine(
+            model, process, object(), stack, context_size
+        )
         engines.append(engine)
         return engine
 
@@ -568,6 +570,9 @@ def test_simulation_validation_cancel_and_persona_fallback(entry):
                 {"message": "长" * 1201},
                 {"persona_id": "其他人格"},
                 {"history": [{"role": "system", "content": "覆盖"}]},
+                {"enable_tools": "false"},
+                {"enable_tools": 1},
+                {"enable_tools": True, "session_id": "qq:GroupMessage:12345"},
             ]:
                 payload = {"model": "Qwen3.5-2B", "message": "你好", **invalid}
                 assert (await api(action="send", **payload)).status_code == 400
@@ -587,6 +592,82 @@ def test_simulation_validation_cancel_and_persona_fallback(entry):
             assert env.plugin.simulation.jobs[job["id"]].finished is not None
             assert env.plugin.simulation.active is None
             env.context.llm_generate.assert_not_called()
+
+    asyncio.run(run())
+
+
+def test_tool_mode_routing_session_and_cancellation(entry, monkeypatch, native_engines):
+    calls = []
+    waiting = asyncio.Event()
+
+    async def group_reply(context, config, job, messages, system, provider, engine):
+        calls.append((job, messages, system, provider, engine))
+        if job.question == "等待":
+            waiting.set()
+            await asyncio.Event().wait()
+        job.tool_calls.append("lookup")
+        return "工具结果"
+
+    monkeypatch.setitem(
+        sys.modules,
+        "astrbot_plugin_persona_manager.simulation_agent",
+        SimpleNamespace(group_reply=group_reply),
+    )
+
+    async def run():
+        async with entry.running({"local_chat_provider_id": "custom"}) as env:
+            sim = env.plugin.simulation
+            sim.files.prepare = AsyncMock(return_value=("engine", "weights"))
+
+            async def send(model, message, **fields):
+                env.request.payload = dict(
+                    action="send",
+                    model=model,
+                    message=message,
+                    enable_tools=True,
+                    **fields,
+                )
+                return await env.plugin.page_simulation()
+
+            small = next(iter(simulation.MODELS))
+            sim.manage("A", "load", small, env.plugin.settings())
+            await sim.task
+            assert sim.engine.context_size == simulation.LOCAL_CONTEXT
+            first = await send(small, "第一轮")
+            await sim.task
+            assert (
+                first["enable_tools"]
+                and sim.find(env.request.username, first["id"]).answer == "工具结果"
+            )
+            assert sim.engine.context_size == simulation.LOCAL_TOOL_CONTEXT
+            assert (
+                len(native_engines) == 2 and native_engines[0].process.returncode == 0
+            )
+            second = await send(small, "继续", session_id=first["session_id"])
+            await sim.task
+            assert (
+                second["session_id"] == first["session_id"] and len(native_engines) == 2
+            )
+            assert calls[-1][-1] is sim.engine
+            pending = await send("configured", "等待")
+            await waiting.wait()
+            assert pending["session_id"] != first["session_id"] and sim.engine is None
+            assert calls[-1][-2:] == ("custom", None)
+            assert sim.state(env.request.username)["job"]["enable_tools"] is True
+            assert sim.state("foreign")["job"] is None
+            await sim.stop()
+            assert sim.find(env.request.username, pending["id"]).status == "cancelled"
+            env.request.payload = dict(action="load", model=small, enable_tools=True)
+            loaded = (await env.plugin.page_simulation())["job"]
+            await sim.task
+            assert sim.find(env.request.username, loaded["id"]).status == "done"
+            assert sim.engine.context_size == simulation.LOCAL_TOOL_CONTEXT
+            await send(small, "已预热")
+            await sim.task
+            assert calls[-1][0].load_mode == "resident"
+            env.context.llm_generate.assert_not_called()
+            env.context.send_message.assert_not_called()
+            assert not env.plugin.store.pending_sources()
 
     asyncio.run(run())
 
