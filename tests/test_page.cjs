@@ -8,6 +8,17 @@ const vm = require("node:vm");
 function page(options = {}) {
   const elements = new Map();
   const posts = [];
+  const reads = [];
+  const timers = new Map();
+  let nextTimer = 0;
+  function schedule(callback, repeat) {
+    const id = ++nextTimer;
+    timers.set(id, () => {
+      if (!repeat) timers.delete(id);
+      return callback();
+    });
+    return id;
+  }
   const schema = JSON.parse(fs.readFileSync(path.join(__dirname, "../_conf_schema.json"), "utf8"));
   schema.daily_calls = { ...schema.daily_calls, minimum: 0, maximum: 100 };
   schema.thinking_notice_text = { ...schema.thinking_notice_text, maxLength: 1000 };
@@ -46,11 +57,18 @@ function page(options = {}) {
   const sandbox = vm.createContext({
     document, Intl, Date, console,
     window: {
-      setTimeout: () => 1, clearTimeout() {},
+      setTimeout: callback => schedule(callback, false),
+      setInterval: callback => schedule(callback, true),
+      clearTimeout: id => timers.delete(id),
+      clearInterval: id => timers.delete(id),
       addEventListener() {},
       AstrBotPluginPage: {
         ready: async () => ({}),
-        apiGet: async () => { if (refreshError) throw refreshError; return view; },
+        apiGet: async endpoint => {
+          reads.push(endpoint);
+          if (refreshError) throw refreshError;
+          return view;
+        },
         apiPost: async (endpoint, payload) => {
           posts.push(JSON.parse(JSON.stringify({ endpoint, payload })));
           if (endpoint === "simulation" && options.simulation) return options.simulation(payload);
@@ -68,7 +86,7 @@ function page(options = {}) {
     },
   });
   vm.runInContext(fs.readFileSync(path.join(__dirname, "../pages/manage/app.js"), "utf8"), sandbox);
-  return { elements, posts, view, sandbox };
+  return { elements, posts, reads, timers, view, sandbox };
 }
 
 const flush = () => new Promise((resolve) => setImmediate(resolve));
@@ -92,6 +110,63 @@ function simulateModels() {
     };
   };
 }
+
+test("idle panels only refresh on request and a manual refresh can unlock a busy simulator", async () => {
+  let otherBusy = true;
+  const ui = page({simulation: () => ({job: null, busy: otherBusy, loaded_model: "Qwen3-8B"})});
+  await flush();
+  const el = id => ui.elements.get(id);
+  el("panel-simulation").hidden = true;
+  assert.deepEqual(ui.reads, ["state"]);
+  assert.equal(ui.timers.size, 0);
+  edit(ui, "thinking_notice_text", "正在编辑的设置");
+  await el("refresh").handlers.click();
+  assert.deepEqual(ui.reads, ["state", "state"]);
+  assert.equal(ui.posts.length, 0);
+  assert.equal(el("setting-thinking_notice_text").value, "正在编辑的设置");
+
+  el("panel-simulation").hidden = false;
+  vm.runInContext('showPanel("simulation")', ui.sandbox);
+  await flush();
+  assert.equal(el("sim-model").disabled, true);
+  assert.equal(ui.timers.size, 0);
+  otherBusy = false;
+  await el("refresh").handlers.click();
+  assert.equal(el("sim-model").disabled, false);
+  assert.deepEqual(ui.posts.map(p => p.payload.action), ["active", "active"]);
+  assert.equal(ui.timers.size, 0);
+});
+
+test("an active reply finishes in the background without rendering while editing settings", async () => {
+  const model = "Qwen3.5-2B";
+  const job = {id: "test", operation: "send", question: "试聊", model, loaded_model: model};
+  const ui = page({simulation: ({action}) => {
+    if (action === "active") return {job: null, busy: false, loaded_model: model};
+    if (action === "send") return {...job, status: "running"};
+    assert.equal(action, "poll");
+    return {...job, status: "done", answer: "已完成", prompt_source: "已保存的人格"};
+  }});
+  await flush();
+  const el = id => ui.elements.get(id);
+  el("sim-input").value = job.question;
+  await el("sim-form").handlers.submit({preventDefault() {}});
+  assert.equal(ui.timers.size, 1);
+  const visibleMessages = el("sim-messages").children;
+  el("panel-simulation").hidden = true;
+  const field = el("setting-thinking_notice_text");
+  edit(ui, "thinking_notice_text", "写到一半");
+  await [...ui.timers.values()][0]();
+  assert.equal(ui.timers.size, 0);
+  assert.deepEqual(ui.reads, ["state"]);
+  assert.equal(el("sim-messages").children, visibleMessages);
+  assert.equal(el("setting-thinking_notice_text"), field);
+  assert.equal(field.value, "写到一半");
+  el("panel-simulation").hidden = false;
+  vm.runInContext('showPanel("simulation")', ui.sandbox);
+  await flush();
+  assert.match(textOf(el("sim-messages")), /已完成/);
+  assert.equal(ui.timers.size, 0);
+});
 
 test("simulation keeps independent multi-turn chats when switching between 2B and 8B", async () => {
   const ui = page({simulation: simulateModels()});
@@ -648,7 +723,7 @@ test("overview separates captured dialogue, pending extraction and stored memory
   ui.view.schedule = { state: "budget", reason: "预计 20009 tokens，单次上限 20000 tokens", groups: [] };
   await vm.runInContext("loadState()", ui.sandbox);
   const detail = textOf(ui.elements.get("schedule-details"));
-  assert.match(detail, /运行版本：v2\.2\.1 \/ 页面 v2\.6\.0/);
+  assert.match(detail, /运行版本：v2\.2\.1 \/ 页面 v2\.6\.1/);
   assert.match(detail, /已采集原文：24/);
   assert.match(detail, /待整理对话：20/);
   assert.match(detail, /生效记忆：0/);
@@ -687,7 +762,7 @@ test("empty learning calls explain zero capture, paused and disabled learning wi
 test("legacy overview diagnostics remain unknown and translate active scheduler states", async () => {
   const ui = page(); await flush();
   const detail = textOf(ui.elements.get("schedule-details"));
-  assert.match(detail, /运行版本：未知 \/ 页面 v2\.6\.0/);
+  assert.match(detail, /运行版本：未知 \/ 页面 v2\.6\.1/);
   assert.match(detail, /已采集原文：—/);
   assert.match(detail, /待整理对话：—/);
   assert.match(detail, /待确认记忆：—/);

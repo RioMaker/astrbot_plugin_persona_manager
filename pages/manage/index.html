@@ -5,7 +5,7 @@
     <meta name="viewport" content="width=device-width, initial-scale=1" />
     <meta name="color-scheme" content="light dark" />
     <title>可可子 · 人格管理</title>
-    <link rel="stylesheet" href="./style.css?v=2.6.0" />
+    <link rel="stylesheet" href="./style.css?v=2.6.1" />
   </head>
   <body>
     <main class="shell" id="app" aria-busy="true">
@@ -18,7 +18,7 @@
         <div class="header-actions">
           <span class="status-pill" id="learning-status">正在连接</span>
           <button id="learning-toggle" type="button" disabled>暂停学习</button>
-          <button id="refresh" type="button" disabled>刷新</button>
+          <button id="refresh" type="button" disabled>手动刷新</button>
         </div>
       </header>
 
@@ -65,7 +65,7 @@
       </section>
 
       <section id="panel-simulation" aria-labelledby="simulation-title" hidden>
-        <div class="section-heading"><div><h2 id="simulation-title">模拟对话</h2><p class="muted">在这里和当前人格试聊。切换模型可继续各自的对话，刷新页面会清空已完成的聊天记录。</p></div></div>
+        <div class="section-heading"><div><h2 id="simulation-title">模拟对话</h2><p class="muted">在这里和当前人格试聊。切换模型可继续各自的对话，重新打开页面会清空已完成的聊天记录。</p></div></div>
         <article class="card sim-card">
           <div class="sim-toolbar">
             <div class="field grow"><label for="sim-model">模拟模型</label><select id="sim-model" disabled></select></div>
@@ -229,6 +229,6 @@
       <div id="memory-detail-fields"></div><p id="memory-detail-error" class="field-error" role="alert"></p>
       <div class="dialog-actions"><button id="memory-detail-cancel" type="button">取消</button><button type="submit" class="primary">保存修改</button></div>
     </form></dialog>
-    <script type="module" src="./app.js?v=2.6.0"></script>
+    <script type="module" src="./app.js?v=2.6.1"></script>
   </body>
 </html>

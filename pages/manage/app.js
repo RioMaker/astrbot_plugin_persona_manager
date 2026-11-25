@@ -30,7 +30,6 @@ let simWaiting = false;
 let simNotice = "";
 let simLoaded = null;
 let simOtherBusy = false;
-let simStateTimer = null;
 let simEpoch = 0;
 
 const array = (value) => (Array.isArray(value) ? value : []);
@@ -828,7 +827,7 @@ function renderOverview() {
   details.replaceChildren();
   const status = object(state.status);
   const capture = object(status.capture);
-  addMeta(details, "运行版本", `${status.runtime_version ? `v${status.runtime_version}` : "未知"} / 页面 v2.6.0`);
+  addMeta(details, "运行版本", `${status.runtime_version ? `v${status.runtime_version}` : "未知"} / 页面 v2.6.1`);
   addMeta(details, "已采集原文", countText(status.sources));
   addMeta(details, "待整理对话", countText(status.pending_interactions));
   addMeta(details, "生效记忆", countText(status.memories));
@@ -1175,10 +1174,6 @@ byId("knowledge-form").addEventListener("submit",async(event)=>{
   event.preventDefault();
   await perform(async()=>{await action("knowledge_force",{key:byId("knowledge-key").value,content:byId("knowledge-content").value});byId("knowledge-key").value="";byId("knowledge-content").value="";},"管理员确认的知识已录入。");
 });
-if (typeof window.setInterval === "function") window.setInterval(()=>{
-  if(ready && !busy && !coreDirty && !configDirty && !document.querySelector("dialog[open]")) perform(()=>loadState());
-},10000);
-
 byId("expression-cancel").addEventListener("click", () => byId("expression-dialog").close());
 byId("expression-form").addEventListener("submit", async (event) => {
   event.preventDefault();
@@ -1269,6 +1264,7 @@ function simControls() {
 }
 
 function renderSim() {
+  if (byId("panel-simulation").hidden) return;
   const model = byId("sim-model").value;
   const key = simThread();
   byId("sim-model-note").textContent = model === "configured"
@@ -1299,10 +1295,6 @@ function renderSimStatus() {
   if (byId("sim-resident").textContent !== residency) byId("sim-resident").textContent = residency;
   if (byId("sim-status").textContent !== detail) byId("sim-status").textContent = detail;
   simControls();
-  window.clearTimeout(simStateTimer);
-  if (ready && !simWaiting && !simJob && !byId("panel-simulation").hidden) {
-    simStateTimer = window.setTimeout(() => recoverSim(), 5000);
-  }
 }
 
 function acceptSim(job) {
@@ -1368,7 +1360,7 @@ async function recoverSim(resume = false) {
   } catch (error) {
     if (epoch === simEpoch) simNotice = error?.message || "获取模拟状态失败。";
   } finally {
-    if (epoch === simEpoch) {
+    if (epoch === simEpoch && !byId("panel-simulation").hidden) {
       if (resume) renderSim();
       else renderSimStatus();
     }
@@ -1452,8 +1444,10 @@ function showPanel(name) {
     if (active) tab.setAttribute("aria-current", "page"); else tab.removeAttribute("aria-current");
     byId(`panel-${tab.dataset.panel}`).hidden = !active;
   });
-  if (name === "simulation") void recoverSim(true);
-  else window.clearTimeout(simStateTimer);
+  if (name === "simulation") {
+    renderSim();
+    void recoverSim(true);
+  }
 }
 
 document.querySelectorAll("[data-panel]").forEach((button) => {
@@ -1479,7 +1473,10 @@ byId("dialog-form").addEventListener("submit", (event) => {
 byId("core-content").addEventListener("input", () => { coreDirty = true; renderCoreDirty(); });
 byId("core-versions").addEventListener("change", () => { renderVersion("core"); setAvailability(); });
 byId("style-versions").addEventListener("change", () => { renderVersion("style"); setAvailability(); });
-byId("refresh").addEventListener("click", () => perform(() => loadState(), coreDirty || configDirty ? "已刷新，未保存的草稿已保留。" : "已刷新。"));
+byId("refresh").addEventListener("click", () => perform(async () => {
+  await loadState();
+  if (!byId("panel-simulation").hidden) await recoverSim();
+}, coreDirty || configDirty ? "已刷新，未保存的草稿已保留。" : "已刷新。"));
 byId("settings-form").addEventListener("submit", (event) => { event.preventDefault(); return saveSettings(); });
 byId("group-search").addEventListener("input", renderGroupPicker);
 byId("group-filter").addEventListener("change", renderGroupPicker);
