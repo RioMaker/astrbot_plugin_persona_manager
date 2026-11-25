@@ -1,1 +1,1 @@
-# Runtime uses Python standard library and the hosting AstrBot installation.
+aiohttp>=3.9,<4

@@ -33,6 +33,16 @@
   --shadow: none;
 }
 * { box-sizing: border-box; }
+.sim-card { max-width: 840px; margin: 0 auto; }
+.sim-toolbar, .sim-composer { display: flex; gap: 14px; align-items: flex-end; }
+.sim-toolbar + .field-hint { margin: 8px 0 14px; }
+.sim-messages { display: flex; flex-direction: column; gap: 12px; min-height: 160px; max-height: 48vh; overflow: auto; border-block: 1px solid var(--line); padding: 14px 0; }
+.sim-message { max-width: 86%; white-space: pre-wrap; overflow-wrap: anywhere; border-radius: 12px; padding: 8px 12px; background: var(--bg); align-self: flex-start; }
+.sim-message.user { align-self: flex-end; background: var(--accent-soft); }
+.sim-message strong { display: block; color: var(--muted); font-size: 11px; }
+.sim-message p { margin: 2px 0 0; }
+#sim-status { min-height: 1.6em; margin: 8px 0; overflow-wrap: anywhere; }
+@media (max-width: 600px) { .sim-composer { flex-direction: column; align-items: stretch; } .sim-composer .item-actions { justify-content: flex-end; } }
 body { margin: 0; background: var(--bg); color: var(--text); font: 14px/1.65 system-ui, -apple-system, "Segoe UI", "Microsoft YaHei", sans-serif; }
 button, input, textarea, select { font: inherit; }
 button, input, textarea, select, summary { outline-offset: 3px; }

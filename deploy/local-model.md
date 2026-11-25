@@ -7,12 +7,19 @@
 | Qwen3.5-0.8B | [0.53 GB](https://huggingface.co/unsloth/Qwen3.5-0.8B-GGUF/blob/main/Qwen3.5-0.8B-Q4_K_M.gguf) | 对延迟很敏感、对话任务简单时的备选 |
 | Qwen3.5-2B | 1.28 GB | 首选，用于单群或几个低频群的中文短回复 |
 | Qwen3.5-4B | [2.74 GB](https://huggingface.co/unsloth/Qwen3.5-4B-GGUF/blob/main/Qwen3.5-4B-Q4_K_M.gguf) | 质量不足时的下一档，先用相同提示实测等待时间 |
+| Qwen3-8B | [5.03 GB](https://huggingface.co/Qwen/Qwen3-8B-GGUF/blob/main/Qwen3-8B-Q4_K_M.gguf) | 管理页可直接与 2B 切换试聊，适合低频对比回复质量 |
 | Qwen3.5-9B | [5.68 GB](https://huggingface.co/unsloth/Qwen3.5-9B-GGUF/blob/main/Qwen3.5-9B-Q4_K_M.gguf) | 内存有机会装下，双核短时多条消息容易排队 |
 | Qwen3-14B | [9.00 GB](https://huggingface.co/Qwen/Qwen3-14B-GGUF/blob/main/Qwen3-14B-Q4_K_M.gguf) | 短上下文、主机空闲时可尝试加载，和 AstrBot 共机时余量很小 |
 
 权重之外还要容纳上下文缓存、计算缓冲区、Ubuntu、AstrBot 和消息适配器。此次 CPU 镜像大小约 0.82 GB。若想同时留两份 2B 量化权重用于更新和回退，建议在系统与机器人现有占用之外预留约 5 GB 磁盘，语料另计。先用 `free -h`、`df -h` 查看实际余量。
 
 ## 用公开模型验证延迟
+
+在 **插件详情 → 人格管理 → 模拟对话** 可以直接比较 2B 和 8B。通过 Git 更新插件后，分别选一档，发同一句群聊消息即可。首次发送会下载对应权重，回答结束会释放 CPU 引擎，下一轮的等待时间包含模型加载。两档同时缓存时，插件数据盘建议预留约 6.5 GB。
+
+在开发机的 Linux 容器中限制 2 vCPU、12 GiB 内存，用同一句中文短消息各测一次。权重已下载，放在 Windows 宿主机挂载的目录里。从提交到收到完整短答，2B 用了 27 秒，8B 用了 97 秒，包含首次文件校验、模型加载和生成。采样到的推理进程峰值驻留内存分别是 1.92 GiB 和 8.44 GiB。云服务器的 CPU 和磁盘会直接影响等待时间。
+
+### 为群聊启动常驻模型服务
 
 在安装 Docker Engine 和 Compose v2 的 Ubuntu 上，从本插件目录执行。命令将基线模型存放在插件目录外，先校验 SHA256 再启用文件。
 

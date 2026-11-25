@@ -28,11 +28,12 @@ from .ingress import group_identity, is_text_chat, own_text, sample
 from .memory_tools import MemoryTools
 from .runtime import CONTEXT_MARKER, Runtime
 from .settings import Settings
+from .simulation import Simulation, SimulationBusy, chat_messages
 from .storage import Store
 from .temporal import BEIJING
 
 PLUGIN_NAME = "astrbot_plugin_persona_manager"
-PLUGIN_VERSION = "2.4.0"
+PLUGIN_VERSION = "2.5.0"
 GATE_NAME = "astrbot_plugin_access_gate"
 PENDING_KEY = PLUGIN_NAME + ":interaction"
 SENT_KEY = PLUGIN_NAME + ":sent"
@@ -58,6 +59,7 @@ class PersonaManagerPlugin(Star):
             / "persona.sqlite3"
         )
         self.store = Store(path)
+        self.simulation = Simulation(path.parent / "simulation", context)
         self.runtime = Runtime(
             self.store,
             context,
@@ -77,6 +79,7 @@ class PersonaManagerPlugin(Star):
         for endpoint, method, handler in (
             ("state", "GET", self.page_state),
             ("seed", "GET", self.page_seed),
+            ("simulation", "POST", self.page_simulation),
             ("action", "POST", self.page_action),
         ):
             context.register_web_api(
@@ -881,6 +884,9 @@ class PersonaManagerPlugin(Star):
             return json_response(
                 {
                     "config": page_config(self.config),
+                    "simulation_models": self.simulation.models(
+                        self.settings().local_chat_provider_id
+                    ),
                     "groups": await self.runtime.db("known_groups"),
                     "choices": await self._page_choices(),
                     "usage": usage_for_page(usage, self.settings()),
@@ -959,6 +965,65 @@ class PersonaManagerPlugin(Star):
             encoding="utf-8"
         )
         return json_response({"content": content})
+
+    async def page_simulation(self):
+        owner = request.username
+        if not owner:
+            return error_response("需要登录 AstrBot 管理面板", status_code=403)
+        payload = await request.json(default={})
+        if not isinstance(payload, dict):
+            return error_response("请求必须是对象", status_code=400)
+        try:
+            action = payload.get("action")
+            if action == "active":
+                job = self.simulation.active
+                return json_response(
+                    {"job": job.view() if job and job.owner == owner else None}
+                )
+            if action in ("poll", "cancel"):
+                try:
+                    job = self.simulation.find(owner, payload.get("id"))
+                except ValueError as exc:
+                    return error_response(str(exc), status_code=404)
+                if action == "cancel" and self.simulation.active is job:
+                    await self.simulation.stop()
+                return json_response(job.view())
+            if action != "send":
+                raise ValueError("未知的模拟操作")
+            persona_id = self._page_persona(payload.get("persona_id"))
+            messages = chat_messages(payload)
+            model = payload.get("model")
+            if not isinstance(model, str):
+                raise ValueError("请选择模拟模型")
+            try:
+                persona = await self.context.persona_manager.get_persona(persona_id)
+            except (ValueError, KeyError):
+                persona = None
+            core = getattr(persona, "system_prompt", "") or ""
+            source = "已保存的人格"
+            if not core.strip():
+                core = (Path(__file__).parent / "persona_seed.txt").read_text(
+                    encoding="utf-8"
+                )
+                source = "推荐人格底稿"
+            return json_response(
+                self.simulation.start(
+                    owner,
+                    model,
+                    messages,
+                    persona_id,
+                    core,
+                    source,
+                    self.settings().local_chat_provider_id,
+                )
+            )
+        except SimulationBusy as exc:
+            return error_response(str(exc), status_code=409)
+        except ValueError as exc:
+            return error_response(str(exc), status_code=400)
+        except Exception:
+            logger.warning("[可可子人格] 无法启动模拟对话。")
+            return error_response("无法启动模拟对话，请检查插件日志", status_code=500)
 
     async def page_action(self):
         if not request.username:
@@ -1156,5 +1221,6 @@ class PersonaManagerPlugin(Star):
 
     async def terminate(self):
         self._debug.clear()
+        await self.simulation.close()
         await self.discovery.close()
         await self.runtime.close()

@@ -17,6 +17,7 @@ function page(options = {}) {
     profile: {}, memories: [], scopes: [], styles: [], style_versions: [],
     config: { values: Object.fromEntries(Object.entries(schema).map(([key, field]) => [key, field.default])), schema, revision: "r1" },
     choices: { personas: [{ id: "可可子", label: "可可子" }], providers: [{ id: "cheap-model", label: "学习模型" }] },
+    simulation_models: [{id:"Qwen3.5-2B", label:"2B"}, {id:"Qwen3-8B", label:"8B"}],
     usage: { day: "2026-10-29", summary: {}, daily: [], groups: [], recent: [] },
     schedule: { state: "idle", reason: "等待样本", phase: "regular", groups: [] },
   };
@@ -45,12 +46,14 @@ function page(options = {}) {
   const sandbox = vm.createContext({
     document, Intl, Date, console,
     window: {
+      setTimeout: () => 1, clearTimeout() {},
       addEventListener() {},
       AstrBotPluginPage: {
         ready: async () => ({}),
         apiGet: async () => { if (refreshError) throw refreshError; return view; },
         apiPost: async (endpoint, payload) => {
           posts.push(JSON.parse(JSON.stringify({ endpoint, payload })));
+          if (endpoint === "simulation" && options.simulation) return options.simulation(payload);
           if (options.postError) throw options.postError;
           if (options.unconfirmed) return {};
           if (payload.action === "config_save") {
@@ -69,6 +72,44 @@ function page(options = {}) {
 }
 
 const flush = () => new Promise((resolve) => setImmediate(resolve));
+
+test("simulation keeps independent multi-turn chats when switching between 2B and 8B", async () => {
+  const ui = page({simulation: p => ({id: "job", status: "done", model: p.model, question: p.message, answer: "收到", prompt_source: "已保存的人格"})});
+  await flush();
+  const el = id => ui.elements.get(id);
+  const select = name => { el("sim-model").value = name; el("sim-model").handlers.change(); };
+  const send = async message => { el("sim-input").value = message; await el("sim-form").handlers.submit({preventDefault(){}}); };
+  assert.equal(el("sim-model").value, "Qwen3.5-2B");
+  await send("小模型第一轮");
+  select("Qwen3-8B"); await send("大模型第一轮");
+  assert.deepEqual(ui.posts[1].payload.history, []);
+  select("Qwen3.5-2B"); await send("继续刚才的话");
+  assert.deepEqual(ui.posts[2].payload.history, [{role:"user",content:"小模型第一轮"},{role:"assistant",content:"收到"}]);
+  el("sim-clear").handlers.click();
+  assert.doesNotMatch(textOf(el("sim-messages")), /继续刚才/);
+  select("Qwen3-8B");
+  assert.match(textOf(el("sim-messages")), /大模型第一轮/);
+  assert.ok(ui.posts.every(p => p.endpoint === "simulation"));
+});
+
+test("simulation shows preparation progress, blocks duplicates and restores cancelled input", async () => {
+  const base = {id: "pending", model: "Qwen3-8B", question: "试一下"};
+  const ui = page({simulation: p => p.action === "cancel"
+    ? {...base, status: "cancelled", detail: "已停止"}
+    : {...base, status: "running", detail: "下载模型 · 30%"}});
+  await flush();
+  const el = id => ui.elements.get(id);
+  el("sim-model").value = base.model; el("sim-input").value = base.question;
+  await el("sim-form").handlers.submit({preventDefault(){}});
+  assert.equal(el("sim-model").disabled, true);
+  assert.match(el("sim-status").textContent, /30%/);
+  await el("sim-form").handlers.submit({preventDefault(){}});
+  assert.equal(ui.posts.length, 1);
+  await el("sim-stop").handlers.click();
+  assert.equal(el("sim-input").value, base.question);
+  assert.equal(el("sim-model").disabled, false);
+  assert.equal(el("sim-clear").disabled, true);
+});
 
 test("classified correction review displays the hold and confirms its exact revision", async () => {
   const ui = page(); await flush();
@@ -536,7 +577,7 @@ test("overview separates captured dialogue, pending extraction and stored memory
   ui.view.schedule = { state: "budget", reason: "预计 20009 tokens，单次上限 20000 tokens", groups: [] };
   await vm.runInContext("loadState()", ui.sandbox);
   const detail = textOf(ui.elements.get("schedule-details"));
-  assert.match(detail, /运行版本：v2\.2\.1 \/ 页面 v2\.4\.0/);
+  assert.match(detail, /运行版本：v2\.2\.1 \/ 页面 v2\.5\.0/);
   assert.match(detail, /已采集原文：24/);
   assert.match(detail, /待整理对话：20/);
   assert.match(detail, /生效记忆：0/);
@@ -575,7 +616,7 @@ test("empty learning calls explain zero capture, paused and disabled learning wi
 test("legacy overview diagnostics remain unknown and translate active scheduler states", async () => {
   const ui = page(); await flush();
   const detail = textOf(ui.elements.get("schedule-details"));
-  assert.match(detail, /运行版本：未知 \/ 页面 v2\.4\.0/);
+  assert.match(detail, /运行版本：未知 \/ 页面 v2\.5\.0/);
   assert.match(detail, /已采集原文：—/);
   assert.match(detail, /待整理对话：—/);
   assert.match(detail, /待确认记忆：—/);

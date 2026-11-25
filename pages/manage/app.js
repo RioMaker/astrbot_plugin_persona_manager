@@ -22,6 +22,12 @@ const configControls = new Map();
 const configSliders = new Map();
 const settingsPanels = new Map();
 let selectedSettingsPanel = "rhythm";
+const simChats = new Map();
+let simJob = null;
+let simKey = "";
+let simTimer = null;
+let simWaiting = false;
+let simNotice = "";
 
 const array = (value) => (Array.isArray(value) ? value : []);
 const object = (value) => (value && typeof value === "object" && !Array.isArray(value) ? value : {});
@@ -169,6 +175,7 @@ function setAvailability() {
   byId("config-reload").disabled ||= !state?.config;
   document.querySelectorAll(".group-toggle input, .group-tags input").forEach((control) => { control.disabled ||= configConflict || !configRevision; });
   document.querySelectorAll("[data-unavailable]").forEach((control) => { control.disabled = true; });
+  simControls();
 }
 
 async function perform(work, successMessage = "") {
@@ -196,6 +203,12 @@ async function loadState({ replaceCore = false } = {}) {
   if (!result || typeof result !== "object" || Array.isArray(result)) throw new Error("管理接口返回了无法识别的数据。");
   state = result;
   selectedPersona = string(first(state.persona?.id, state.persona?.persona_id, selectedPersona));
+  const simSelect = byId("sim-model");
+  const models = array(state.simulation_models);
+  const model = simSelect.value;
+  fillOptions(simSelect, Object.fromEntries(models.map((m) => [m.id, m.label])),
+    models.some((m) => m.id === model) ? model : (models[0]?.id || ""));
+  renderSim();
   byId("persona-id").value = selectedPersona;
   renderState(replaceCore);
 }
@@ -810,7 +823,7 @@ function renderOverview() {
   details.replaceChildren();
   const status = object(state.status);
   const capture = object(status.capture);
-  addMeta(details, "运行版本", `${status.runtime_version ? `v${status.runtime_version}` : "未知"} / 页面 v2.4.0`);
+  addMeta(details, "运行版本", `${status.runtime_version ? `v${status.runtime_version}` : "未知"} / 页面 v2.5.0`);
   addMeta(details, "已采集原文", countText(status.sources));
   addMeta(details, "待整理对话", countText(status.pending_interactions));
   addMeta(details, "生效记忆", countText(status.memories));
@@ -1229,6 +1242,153 @@ async function forgetMemory(memory) {
   if (confirmed) await perform(() => action("memory_forget", { memory_id: recordId(memory) }), "已忘记这条记忆。");
 }
 
+function simThread(model = byId("sim-model").value, persona = selectedPersona) {
+  return JSON.stringify([persona, model, model === "configured" ? state?.config?.values?.local_chat_provider_id : ""]);
+}
+
+function simControls() {
+  const blocked = busy || !ready || simWaiting || Boolean(simJob);
+  byId("sim-model").disabled = blocked;
+  byId("sim-input").disabled = blocked || !byId("sim-model").value;
+  byId("sim-send").disabled = byId("sim-input").disabled || !byId("sim-input").value.trim();
+  byId("sim-clear").disabled = blocked || !simChats.get(simThread())?.length;
+  byId("sim-stop").hidden = !simJob?.id;
+  byId("sim-stop").disabled = !simJob?.id || simWaiting;
+}
+
+function renderSim() {
+  const model = byId("sim-model").value;
+  const key = simThread();
+  byId("sim-model-note").textContent = model === "configured"
+    ? "试聊将调用「模型与预算」中已保存的自定义提供商。"
+    : "首次发送会下载所选的 Q4_K_M 权重，后续试聊复用本机缓存。";
+  const list = byId("sim-messages");
+  const atEnd = list.scrollHeight - list.scrollTop - list.clientHeight < 48;
+  list.replaceChildren();
+  const turns = [...(simChats.get(key) || [])];
+  if (simJob && simKey === key) {
+    turns.push({role: "user", content: simJob.question});
+    if (simJob.answer) turns.push({role: "assistant", content: simJob.answer});
+  }
+  if (!turns.length) list.append(node("p", "发出第一条消息，开始试聊。", "empty"));
+  for (const turn of turns) {
+    const row = node("div", "", `sim-message ${turn.role}`);
+    row.append(node("strong", turn.role === "user" ? "你" : selectedPersona), node("p", turn.content));
+    list.append(row);
+  }
+  if (atEnd) list.scrollTop = list.scrollHeight;
+  byId("sim-status").textContent = simJob?.detail || simNotice;
+  simControls();
+}
+
+function acceptSim(job) {
+  if (!job?.id || !["running", "done", "cancelled", "error"].includes(job.status)) throw new Error("模拟接口返回了无效状态，请重载插件。");
+  simJob = job;
+  if (job.status === "running") {
+    if (simTimer !== null) window.clearTimeout(simTimer);
+    simTimer = window.setTimeout(() => pollSim(job.id), 900);
+  } else {
+    if (simTimer !== null) window.clearTimeout(simTimer);
+    simTimer = null;
+    if (job.status === "done" && job.answer?.trim()) {
+      const turns = simChats.get(simKey) || [];
+      turns.push({role: "user", content: job.question}, {role: "assistant", content: job.answer.trim()});
+      simChats.set(simKey, turns.slice(-60));
+      simNotice = `已使用${job.prompt_source}，本轮由 ${job.model === "configured" ? "自定义模型" : job.model} 回复。`;
+    } else {
+      if (simKey === simThread()) byId("sim-input").value = job.question;
+      simNotice = job.detail || "模型没有返回正文。";
+    }
+    simJob = null;
+  }
+  renderSim();
+}
+
+async function pollSim(id) {
+  if (simJob?.id !== id) return;
+  try {
+    const result = await bridge.apiPost("simulation", {action: "poll", id});
+    if (simJob?.id === id) acceptSim(result);
+  } catch (error) {
+    if (simJob?.id !== id) return;
+    const detail = error?.message || "读取生成进度失败";
+    if (error?.status === 404 || /过期|不存在|需要登录/.test(detail)) {
+      acceptSim({...simJob, status: "error", detail});
+    } else {
+      simJob.detail = `${detail}，正在重新连接…`;
+      renderSim();
+      simTimer = window.setTimeout(() => pollSim(id), 2500);
+    }
+  }
+}
+
+async function recoverSim() {
+  if (!ready || simWaiting || simJob) return;
+  simWaiting = true;
+  simControls();
+  try {
+    const {job} = await bridge.apiPost("simulation", {action: "active"});
+    if (job) {
+      byId("sim-model").value = job.model;
+      simKey = simThread(job.model, job.persona);
+      acceptSim(job);
+    }
+  } catch (error) {
+    simNotice = error?.message || "获取模拟状态失败。";
+  } finally {
+    simWaiting = false;
+    renderSim();
+  }
+}
+
+byId("sim-form").addEventListener("submit", async (event) => {
+  event.preventDefault();
+  const input = byId("sim-input");
+  const message = input.value.trim(), model = byId("sim-model").value;
+  if (!ready || busy || simJob || simWaiting || !message || !model) return;
+  simKey = simThread();
+  const history = (simChats.get(simKey) || []).slice(-12);
+  simJob = {model, question: message, detail: "正在提交…"};
+  simWaiting = true;
+  simNotice = "";
+  input.value = "";
+  renderSim();
+  try {
+    acceptSim(await bridge.apiPost("simulation", {action: "send", model, message, history, persona_id: selectedPersona}));
+  } catch (error) {
+    simJob = null;
+    input.value = message;
+    simNotice = error?.message || "模拟请求未完成，请重试。";
+  } finally {
+    simWaiting = false;
+    renderSim();
+  }
+});
+byId("sim-input").addEventListener("input", simControls);
+byId("sim-model").addEventListener("change", () => { simNotice = ""; renderSim(); });
+byId("sim-clear").addEventListener("click", () => {
+  if (simJob || simWaiting) return;
+  simChats.delete(simThread());
+  byId("sim-input").value = "";
+  simNotice = "";
+  renderSim();
+});
+byId("sim-stop").addEventListener("click", async () => {
+  const id = simJob?.id;
+  if (!id || simWaiting) return;
+  simWaiting = true;
+  simControls();
+  try {
+    const result = await bridge.apiPost("simulation", {action: "cancel", id});
+    if (simJob?.id === id) acceptSim(result);
+  } catch (error) {
+    if (simJob?.id === id) simJob.detail = error?.message || "停止失败，请重试。";
+  } finally {
+    simWaiting = false;
+    renderSim();
+  }
+});
+
 function showPanel(name) {
   document.querySelectorAll("[data-panel]").forEach((tab) => {
     const active = tab.dataset.panel === name;
@@ -1236,6 +1396,7 @@ function showPanel(name) {
     if (active) tab.setAttribute("aria-current", "page"); else tab.removeAttribute("aria-current");
     byId(`panel-${tab.dataset.panel}`).hidden = !active;
   });
+  if (name === "simulation") void recoverSim();
 }
 
 document.querySelectorAll("[data-panel]").forEach((button) => {

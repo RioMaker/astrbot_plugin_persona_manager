@@ -1,10 +1,18 @@
-# 可可子人格管理 2.4.0
+# 可可子人格管理 2.5.0
 
 <p align="center"><img src="logo.png" width="160" height="160" alt="可可子 AI 伙伴 Logo：浅绿双马尾、彩虹皇冠和蓝色耳机，挥手打招呼"></p>
 
 固定核心人格，自动积累群内表达、同 QQ 跨群相处记忆与事件时间线。适配现有 `astrbot_plugin_access_gate`，只处理 OneBot/NapCat 的 QQ 群聊。
 
 支持为指定群的文字聊天使用自己微调的 GGUF 模型。2 核 16 GB、20 GB 系统盘的 CPU 服务器建议从 **Qwen3.5-2B、Q4_K_M、单并发** 起步。部署、测速、群聊语料准备及租卡规格见[本地模型指南](deploy/local-model.md)。
+
+## 在管理页试聊 2B 和 8B
+
+用 AstrBot 的 Git 安装或更新本仓库，重载插件后，在 **插件详情 → 人格管理 → 模拟对话** 选择模型并发送第一条消息。内置 **Qwen3.5-2B**（1.28 GB）与 **Qwen3-8B**（5.03 GB）均为原版对话权重的 Q4_K_M 量化，适用于 Linux x86_64 的 Ubuntu 24.04 或兼容 Debian 容器。页面显示首次下载及生成进度，支持停止和续传。首次准备还会下载约 23 MB 的 CPU 引擎，两档都缓存时建议预留约 6.5 GB 磁盘。
+
+模型和引擎缓存于 `data/plugin_data/astrbot_plugin_persona_manager/simulation/`，与 Git 检出目录分开。页面试聊可直接启动本机推理，使用 2 个 CPU 线程，一次只运行一档，回合结束释放推理进程。后续使用微调版本时，可在“模型与预算”选好群聊本地模型，再在模拟页选择“自定义模型”进行对照。
+
+每档模型各自保留当前页面的对话，发送最近六轮作为上下文。“新对话”清空当前模型的试聊历史。默认使用已保存的目标人格，缺少原生人格时使用插件推荐底稿。试聊不发送 QQ 消息、不开放群聊工具，也不写入群记忆或学习队列。[2B 量化权重](https://huggingface.co/unsloth/Qwen3.5-2B-GGUF/blob/main/Qwen3.5-2B-Q4_K_M.gguf) · [8B 量化权重](https://huggingface.co/Qwen/Qwen3-8B-GGUF/blob/main/Qwen3-8B-Q4_K_M.gguf)
 
 ## 工作逻辑
 
@@ -68,7 +76,7 @@
 
 安装和启动不会改写原生人格。管理页面会读取并备份当前核心；“载入推荐核心”仅载入草稿，点击保存才更新该原生人格的 `system_prompt`，工具白名单、开场对话及其他人格不变。推荐底稿在 [persona_seed.txt](persona_seed.txt)，按已确认设定整理，保存前可编辑。
 
-声明最低 AstrBot 版本为 4.24.0，使用临时 `TextPart`、人格管理、插件 Pages 与后台 LLM 接口；实现依据当前官方文档及源码，部署版本的完整兼容性仍需实际联调。运行时无新增第三方依赖。
+声明最低 AstrBot 版本为 4.24.0，使用临时 `TextPart`、人格管理、插件 Pages 与后台 LLM 接口。模拟页使用 aiohttp，依赖列于 `requirements.txt`。
 
 ## 触发与共存
 

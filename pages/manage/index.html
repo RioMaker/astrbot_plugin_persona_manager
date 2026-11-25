@@ -5,7 +5,7 @@
     <meta name="viewport" content="width=device-width, initial-scale=1" />
     <meta name="color-scheme" content="light dark" />
     <title>可可子 · 人格管理</title>
-    <link rel="stylesheet" href="./style.css?v=2.4.0" />
+    <link rel="stylesheet" href="./style.css?v=2.5.0" />
   </head>
   <body>
     <main class="shell" id="app" aria-busy="true">
@@ -36,6 +36,7 @@
       <nav class="tabs" aria-label="管理内容">
         <button type="button" class="tab active" data-panel="overview" aria-current="page">学习总览</button>
         <button type="button" class="tab" data-panel="settings">设置与方向 <span id="settings-tab-dot" hidden>●</span></button>
+        <button type="button" class="tab" data-panel="simulation">模拟对话</button>
         <button type="button" class="tab" data-panel="core">核心人设</button>
         <button type="button" class="tab" data-panel="memory">用户记忆</button>
         <button type="button" class="tab" data-panel="archive">记忆整理与分类</button>
@@ -61,6 +62,23 @@
           <article class="card"><div class="item-header"><h3>各群用量</h3><span class="muted small">当日后台学习</span></div><div id="usage-groups" class="table-wrap"></div></article>
         </div>
         <article class="card recent-card"><div class="item-header"><h3>最近学习记录</h3><span class="muted small">结果摘要与用量，不展示原始群聊正文</span></div><div id="learning-recent" class="learning-recent"></div></article>
+      </section>
+
+      <section id="panel-simulation" aria-labelledby="simulation-title" hidden>
+        <div class="section-heading"><div><h2 id="simulation-title">模拟对话</h2><p class="muted">在这里和当前人格试聊。切换模型可继续各自的对话，刷新页面会清空已完成的聊天记录。</p></div></div>
+        <article class="card sim-card">
+          <div class="sim-toolbar">
+            <div class="field grow"><label for="sim-model">模拟模型</label><select id="sim-model" disabled></select></div>
+            <button type="button" id="sim-clear" disabled>新对话</button>
+          </div>
+          <p id="sim-model-note" class="field-hint"></p>
+          <div id="sim-messages" class="sim-messages" aria-label="模拟消息"></div>
+          <p id="sim-status" class="small muted" role="status" aria-live="polite"></p>
+          <form id="sim-form" class="sim-composer">
+            <div class="field grow"><label for="sim-input">你的消息</label><textarea id="sim-input" rows="2" maxlength="1200" placeholder="发一句平时会在群里说的话…" disabled></textarea></div>
+            <div class="item-actions"><button id="sim-stop" type="button" hidden>停止</button><button id="sim-send" type="submit" class="primary" disabled>发送</button></div>
+          </form>
+        </article>
       </section>
 
       <section id="panel-settings" aria-labelledby="settings-title" hidden>
@@ -207,6 +225,6 @@
       <div id="memory-detail-fields"></div><p id="memory-detail-error" class="field-error" role="alert"></p>
       <div class="dialog-actions"><button id="memory-detail-cancel" type="button">取消</button><button type="submit" class="primary">保存修改</button></div>
     </form></dialog>
-    <script type="module" src="./app.js?v=2.4.0"></script>
+    <script type="module" src="./app.js?v=2.5.0"></script>
   </body>
 </html>
