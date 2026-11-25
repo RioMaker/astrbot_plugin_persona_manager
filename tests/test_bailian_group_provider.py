@@ -4,6 +4,8 @@ import asyncio
 import inspect
 import json
 import logging
+import time
+from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import AsyncMock
 
@@ -14,6 +16,30 @@ from astrbot_plugin_persona_manager.settings import (
     BAILIAN_LIUYAO_MODEL,
 )
 from astrbot_plugin_persona_manager.tests.astrbot_stub import MockEvent
+
+
+def test_dashboard_discovers_trial_page(tmp_path, monkeypatch):
+    monkeypatch.setenv("ASTRBOT_ROOT", str(tmp_path))
+    pytest.importorskip("astrbot", reason="需安装 AstrBot 才能运行页面发现测试")
+    root = Path(__file__).resolve().parents[1]
+    plugin = SimpleNamespace(root_dir_name=root.name, reserved=False)
+    manager = SimpleNamespace(plugin_store_path=str(root.parent))
+    try:
+        from astrbot.dashboard.services.plugin_page_service import PluginPageService
+    except ModuleNotFoundError as exc:
+        if exc.name not in {
+            "astrbot.dashboard.services",
+            "astrbot.dashboard.services.plugin_page_service",
+        }:
+            raise
+        from astrbot.dashboard.routes.plugin import PluginRoute
+
+        service = object.__new__(PluginRoute)
+        service.plugin_manager = manager
+        pages = asyncio.run(service._discover_plugin_pages(plugin))
+    else:
+        pages = asyncio.run(PluginPageService(manager).discover_plugin_pages(plugin))
+    assert {"manage", "测试群调用"} <= {page.name for page in pages}
 
 
 def test_native_runner_resolves_only_the_selected_events(tmp_path, monkeypatch):
@@ -92,6 +118,9 @@ def test_native_runner_resolves_only_the_selected_events(tmp_path, monkeypatch):
         assert await resolve("777888") is normal
         response = await provider.text_chat(prompt=group)
         assert response.completion_text == "收到"
+        step = provider.turn.detail()["steps"][-1]
+        assert step["usage"]["total_tokens"] is None
+        assert step["prompt"] == f"[user]\n{group}"
         return provider.client
 
     async def run():
@@ -108,3 +137,135 @@ def test_native_runner_resolves_only_the_selected_events(tmp_path, monkeypatch):
     assert sorted(received) == sorted(
         [(BAILIAN_GROUP_CHAT_MODEL, "234567"), (BAILIAN_LIUYAO_MODEL, "456789")]
     )
+
+
+@pytest.mark.parametrize("stream", [False, True])
+def test_traced_adapter_records_each_wire_prompt_and_reported_usage(
+    tmp_path, monkeypatch, stream
+):
+    monkeypatch.setenv("ASTRBOT_ROOT", str(tmp_path))
+    pytest.importorskip("astrbot", reason="需安装 AstrBot 才能运行真实提供商集成测试")
+    import httpx
+    from astrbot.core.agent.tool import FunctionTool, ToolSet
+    from astrbot.core.provider.sources.openai_source import ProviderOpenAIOfficial
+    from astrbot_plugin_persona_manager.simulation_bailian import create_agent_provider
+    from astrbot_plugin_persona_manager.trial_trace import TrialHistory, prompt_text
+
+    source = {"platform_id": "qq", "group_id": "234567", "persona_id": "可可子"}
+    turn = TrialHistory().begin(source, "trial", "练习记录", time.monotonic())
+    requests = []
+    tool_call = {
+        "id": "c1",
+        "type": "function",
+        "function": {"name": "lookup", "arguments": '{"item":"42"}'},
+    }
+
+    def reply(request):
+        body = json.loads(request.content)
+        requests.append(body)
+        assert body["stream"] == stream
+        assert turn.detail()["steps"][-1]["prompt"] == prompt_text(body["messages"])
+        assert json.loads(turn.detail()["steps"][-1]["tools"]) == body["tools"]
+        head = {"id": "resp", "model": "trial", "created": 1}
+        first = len(requests) == 1
+        usage = {
+            "prompt_tokens": 12 if first else 18,
+            "completion_tokens": 3,
+            "total_tokens": 15 if first else 21,
+        }
+        message = {
+            "role": "assistant",
+            **({"tool_calls": [tool_call]} if first else {"content": "查到了 42"}),
+        }
+        finish = "tool_calls" if first else "stop"
+        if not stream:
+            return httpx.Response(
+                200,
+                json={
+                    **head,
+                    "object": "chat.completion",
+                    "usage": usage,
+                    "choices": [
+                        {"index": 0, "message": message, "finish_reason": finish}
+                    ],
+                },
+            )
+        if first:
+            message["tool_calls"] = [{"index": 0, **tool_call}]
+
+        def chunk(choices, **extra):
+            data = {
+                **head,
+                "object": "chat.completion.chunk",
+                "choices": choices,
+                **extra,
+            }
+            return "data: " + json.dumps(data) + "\n\n"
+
+        data = chunk([{"index": 0, "delta": message, "finish_reason": None}])
+        data += chunk([{"index": 0, "delta": {}, "finish_reason": finish}])
+        data += chunk([], usage=usage) + "data: [DONE]\n\n"
+        return httpx.Response(
+            200, text=data, headers={"Content-Type": "text/event-stream"}
+        )
+
+    monkeypatch.setattr(
+        ProviderOpenAIOfficial,
+        "_create_http_client",
+        lambda *args: httpx.AsyncClient(transport=httpx.MockTransport(reply)),
+    )
+    tools = ToolSet()
+    tools.add_tool(
+        FunctionTool(
+            name="lookup",
+            description="查练习记录",
+            parameters={"type": "object", "properties": {"item": {"type": "string"}}},
+        )
+    )
+
+    async def run():
+        provider = create_agent_provider(
+            {"bailian_api_key": "private-key-for-test"},
+            "ws-example",
+            "trial",
+            "test",
+            turn=turn,
+        )
+        kwargs = dict(system_prompt="人格正文", func_tool=tools)
+
+        async def ask(**extra):
+            if stream:
+                replies = [
+                    r async for r in provider.text_chat_stream(**kwargs, **extra)
+                ]
+                return replies[-1]
+            return await provider.text_chat(**kwargs, **extra)
+
+        try:
+            first = await ask(prompt="练习记录")
+            assert first.tools_call_name == ["lookup"]
+            final = await ask(
+                contexts=[
+                    {"role": "user", "content": "练习记录"},
+                    {"role": "assistant", "content": None, "tool_calls": [tool_call]},
+                    {"role": "tool", "tool_call_id": "c1", "content": "练习完成"},
+                ]
+            )
+            assert final.completion_text == "查到了 42"
+        finally:
+            await provider.terminate()
+
+    asyncio.run(run())
+    trace = turn.detail()
+    assert (
+        trace["reported_tokens"] == 36
+        and trace["calls"] == trace["reported_calls"] == 2
+    )
+    steps = trace["steps"][1:]
+    assert [s["usage"]["input_tokens"] for s in steps] == [12, 18]
+    assert all(
+        s["usage"]["output_tokens"] == 3 and s["status"] == "done" for s in steps
+    )
+    assert "lookup" in steps[0]["output"] and "练习完成" in steps[1]["prompt"]
+    assert steps[1]["output"] == "查到了 42"
+    assert "private-key-for-test" not in str(trace)

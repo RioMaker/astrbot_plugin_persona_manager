@@ -36,12 +36,17 @@ def validate_key(key):
         raise ValueError("百炼试聊 API Key 格式无效，请检查插件密钥配置")
 
 
-def create_agent_provider(config, workspace, model, provider_id):
+def create_agent_provider(config, workspace, model, provider_id, *, turn=None):
     key = api_key(config)
     validate_key(key)
     from astrbot.core.provider.sources.openai_source import ProviderOpenAIOfficial
 
-    return ProviderOpenAIOfficial(
+    provider_class = ProviderOpenAIOfficial
+    if turn is not None:
+        from .trial_provider import TrialProvider
+
+        provider_class = TrialProvider
+    provider = provider_class(
         {
             "id": provider_id,
             "type": "openai_chat_completion",
@@ -54,6 +59,9 @@ def create_agent_provider(config, workspace, model, provider_id):
         },
         {},
     )
+    if turn is not None:
+        provider.turn = turn
+    return provider
 
 
 async def generate(workspace, model_code, system, messages, max_tokens, key):

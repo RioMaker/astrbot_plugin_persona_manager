@@ -1,0 +1,38 @@
+<!doctype html>
+<html lang="zh-CN">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <meta name="color-scheme" content="light dark" />
+    <title>测试群调用</title>
+    <link rel="stylesheet" href="./style.css" />
+  </head>
+  <body>
+    <main>
+      <header>
+        <div><h1>测试群调用</h1><p>查看指定群的真实模型请求、工具执行和发送回执。</p></div>
+        <div class="actions">
+          <label class="auto"><input id="auto" type="checkbox" checked /> 自动刷新</label>
+          <button id="refresh" type="button" disabled>刷新</button>
+        </div>
+      </header>
+      <p id="notice" role="status" aria-live="polite">正在连接 Dashboard…</p>
+      <section class="picker" aria-label="测试群选择">
+        <label for="group">测试群</label><select id="group" disabled></select>
+        <span id="model"></span>
+      </section>
+      <div class="columns">
+        <section class="card history" aria-labelledby="history-title">
+          <h2 id="history-title">最近调用</h2>
+          <p class="hint">每群最近 20 条，插件重载后清空。</p>
+          <div id="turns"></div>
+        </section>
+        <section class="card" aria-labelledby="detail-title">
+          <h2 id="detail-title">调用过程</h2>
+          <div id="detail"></div>
+        </section>
+      </div>
+    </main>
+    <script type="module" src="./app.js"></script>
+  </body>
+</html>

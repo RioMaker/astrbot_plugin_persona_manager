@@ -94,7 +94,7 @@ def test_local_chat_respects_other_routes(entry, event_options, config):
 def test_concurrent_trials_do_not_change_session_defaults_or_each_others_clients(
     entry, monkeypatch
 ):
-    def create(config, workspace, code, provider_id):
+    def create(config, workspace, code, provider_id, *, turn):
         return SimpleNamespace(
             model=code, key=simulation_bailian.api_key(config), terminate=AsyncMock()
         )

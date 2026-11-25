@@ -232,13 +232,23 @@ class Settings:
         ]
         if len(matches) != 1:
             return ""
+        return self._active_trial_code(matches[0])
+
+    def _active_trial_code(self, binding: str) -> str:
         try:
-            _, workspace, code = parse_trial_binding(matches[0])
+            _, workspace, code = parse_trial_binding(binding)
         except ValueError:
             return ""
         if workspace == self.bailian_workspace_id and code in self.bailian_model_codes:
             return code
         return ""
+
+    def active_trial_models(self) -> dict[str, str]:
+        result = {}
+        for entry in self.bailian_group_models:
+            scope = entry.partition("=")[0]
+            result[scope] = "" if scope in result else self._active_trial_code(entry)
+        return {scope: model for scope, model in result.items() if model}
 
     def observes(self, group_id: str, platform_id: str) -> bool:
         return self.group_in(group_id, platform_id, self.observation_groups)

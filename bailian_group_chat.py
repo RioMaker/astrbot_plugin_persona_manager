@@ -4,6 +4,7 @@ import asyncio
 from uuid import uuid4
 
 from . import simulation_bailian
+from .trial_trace import TrialHistory
 
 
 class GroupTrialProviders:
@@ -13,8 +14,9 @@ class GroupTrialProviders:
         self.active = {}
         self.closing = set()
         self.closed = False
+        self.history = TrialHistory()
 
-    def bind(self, config, workspace, model):
+    def bind(self, config, workspace, model, turn):
         if self.closed:
             raise RuntimeError("插件正在卸载")
         task = asyncio.current_task()
@@ -27,20 +29,23 @@ class GroupTrialProviders:
         deployment = f"bailian:{workspace}:{model}"
         alias = f"persona-trial/{model}/{uuid4().hex}"
         provider = simulation_bailian.create_agent_provider(
-            config, workspace, model, deployment
+            config, workspace, model, deployment, turn=turn
         )
         registry[alias] = provider
-        self.active[alias] = registry, provider
+        self.active[alias] = registry, provider, turn
         # Both supported pipelines await the hook in the message scheduler task.
         # Its completion also covers stops, tool-only replies and cancellations.
-        task.add_done_callback(lambda _: self.release(alias))
+        task.add_done_callback(
+            lambda done: self.release(alias, cancelled=done.cancelled())
+        )
         return alias
 
-    def release(self, alias):
+    def release(self, alias, *, cancelled=False):
         lease = self.active.pop(alias, None)
         if lease is None:
             return
-        registry, provider = lease
+        registry, provider, turn = lease
+        turn.close("cancelled" if cancelled else None)
         if registry.get(alias) is provider:
             del registry[alias]
         closing = asyncio.create_task(self._terminate(provider))
@@ -56,5 +61,6 @@ class GroupTrialProviders:
     async def close(self):
         self.closed = True
         for alias in list(self.active):
-            self.release(alias)
+            self.release(alias, cancelled=True)
         await asyncio.gather(*self.closing)
+        self.history.turns.clear()

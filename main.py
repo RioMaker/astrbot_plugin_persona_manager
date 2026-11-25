@@ -47,11 +47,12 @@ except ModuleNotFoundError as exc:
     from .legacy_web import error_response, json_response, request
 
 PLUGIN_NAME = "astrbot_plugin_persona_manager"
-PLUGIN_VERSION = "2.10.0"
+PLUGIN_VERSION = "2.11.0"
 GATE_NAME = "astrbot_plugin_access_gate"
 PENDING_KEY = PLUGIN_NAME + ":interaction"
 SENT_KEY = PLUGIN_NAME + ":sent"
 TRACE_KEY = PLUGIN_NAME + ":learning_trace"
+TRIAL_KEY = PLUGIN_NAME + ":group_trial"
 NATIVE_REQUEST_KEY = PLUGIN_NAME + ":native_request"
 TOOL_CONTEXT_MARKER = "<kokoko_memory_tools>"
 MEMORY_TOOL_NAMES = {
@@ -95,6 +96,7 @@ class PersonaManagerPlugin(Star):
             ("state", "GET", self.page_state),
             ("seed", "GET", self.page_seed),
             ("simulation", "POST", self.page_simulation),
+            ("trials", "GET", self.page_trials),
             ("action", "POST", self.page_action),
         ):
             context.register_web_api(
@@ -471,6 +473,7 @@ class PersonaManagerPlugin(Star):
             )
             if not trial and not provider_id:
                 return
+            started = time.monotonic()
             if (
                 event.call_llm
                 or event.get_extra("provider_request") is not None
@@ -497,10 +500,17 @@ class PersonaManagerPlugin(Star):
             if trial:
                 if current.bailian_workspace_id != settings.bailian_workspace_id:
                     return
+                turn = self.group_trials.history.begin(
+                    source, trial, own_text(event), started
+                )
                 try:
                     provider_id = self.group_trials.bind(
-                        self.config, current.bailian_workspace_id, trial
+                        self.config, current.bailian_workspace_id, trial, turn
                     )
+                    turn.route.finish(
+                        output=f"百炼 · {current.bailian_workspace_id} / {trial}"
+                    )
+                    event.set_extra(TRIAL_KEY, turn)
                     logger.info(
                         "[可可子人格] %s 群 %s 本轮选用百炼测试模型 %s",
                         platform_id,
@@ -508,6 +518,10 @@ class PersonaManagerPlugin(Star):
                         trial,
                     )
                 except Exception as exc:
+                    turn.route.finish(
+                        "error", f"{type(exc).__name__}，本轮沿用原群模型路由"
+                    )
+                    turn.close("test_failed")
                     logger.warning(
                         "[可可子人格] %s 群 %s 的百炼测试模型 %s 未就绪（%s），沿用原群模型。",
                         platform_id,
@@ -557,6 +571,7 @@ class PersonaManagerPlugin(Star):
                 "当前为独立模型请求，未匹配原生主聊天，不作为互动采集。",
             )
             return
+        stage = None
         try:
             if not await self._gate_allowed(event):
                 self._capture_status(
@@ -570,6 +585,10 @@ class PersonaManagerPlugin(Star):
                     "当前会话人格与插件配置的目标人格不一致，未采集。",
                 )
                 return
+            turn = event.get_extra(TRIAL_KEY)
+            if turn is not None:
+                stage = turn.step("prepare", "准备人格与群聊上下文")
+                stage.write("input", req.prompt)
             source = sample(event, settings, "interaction")
             if source is None:
                 # A main chat containing only images still needs the dream
@@ -678,15 +697,32 @@ class PersonaManagerPlugin(Star):
                     TRACE_KEY, {**detail, "epoch": await self.runtime.db("epoch")}
                 )
         except Exception:
+            if stage is not None:
+                stage.finish("error", "上下文补充失败，继续原对话")
             self._capture_status(
                 event,
                 "request_error",
                 "请求准备异常；请检查 AstrBot 日志中的人格管理提示。",
             )
             logger.warning("[可可子人格] 上下文补充失败，继续原对话。")
+        finally:
+            if stage is not None and stage.end is None:
+                stage.finish(
+                    output="\n".join(
+                        part.text
+                        for part in (
+                            getattr(req, "extra_user_content_parts", None) or []
+                        )
+                        if isinstance(part, TextPart)
+                    )
+                    or "本环节没有附加文字上下文"
+                )
 
     @filter.on_llm_response(priority=-100)
     async def on_response(self, event: AstrMessageEvent, response):
+        turn = event.get_extra(TRIAL_KEY)
+        if turn is not None:
+            turn.final_response(response)
         await self._discard_dream_context(event)
 
     async def _discard_dream_context(self, event):
@@ -735,40 +771,59 @@ class PersonaManagerPlugin(Star):
     async def on_tool_delivery(
         self, event: AstrMessageEvent, tool, tool_args, tool_result
     ):
+        turn = event.get_extra(TRIAL_KEY)
+        if turn is not None:
+            turn.tool_end(tool.name, tool_result)
         await self._discard_dream_context(event)
         # The native tool hook runs after successful delivery, even when the
         # model produces no final reply and no result/send hooks will run.
         delivered = confirmed_tool_delivery(event, tool, tool_args, tool_result)
         if delivered is not None:
-            await self._record_interaction(event, reply_override=delivered)
+            await self._record_interaction(
+                event, reply_override=delivered, tool_receipt=True
+            )
 
-    async def _record_interaction(self, event, *, reply_override=None):
+    @filter.on_using_llm_tool()
+    async def on_tool_start(self, event: AstrMessageEvent, tool, tool_args):
+        turn = event.get_extra(TRIAL_KEY)
+        if turn is not None:
+            turn.tool_start(tool.name, tool_args)
+
+    async def _record_interaction(
+        self, event, *, reply_override=None, tool_receipt=False
+    ):
         settings = self.settings()
-        if group_identity(event, settings) is None or event.get_extra(SENT_KEY, False):
+        if group_identity(event, settings) is None:
             return
         source = event.get_extra(PENDING_KEY, None)
-        if not isinstance(source, dict):
+        pending = isinstance(source, dict) and not event.get_extra(SENT_KEY, False)
+        turn = event.get_extra(TRIAL_KEY)
+        if not pending and turn is None:
             return
         try:
             if not await self._gate_allowed(event) or not await self._selected(event):
-                self._capture_status(
-                    event,
-                    "delivery_blocked",
-                    "回复发送后门禁或目标人格条件改变，未采集。",
-                )
+                if pending:
+                    self._capture_status(
+                        event,
+                        "delivery_blocked",
+                        "回复发送后门禁或目标人格条件改变，未采集。",
+                    )
                 return
-            event.set_extra(SENT_KEY, True)
-            trace = event.get_extra(TRACE_KEY, {})
-            result = event.get_result()
             reply = (
                 reply_override
                 if reply_override is not None
                 else "".join(
                     str(part.text)
-                    for part in getattr(result, "chain", [])
+                    for part in getattr(event.get_result(), "chain", [])
                     if type(part).__name__ == "Plain"
                 )
             )
+            if turn is not None:
+                turn.delivered(reply, by_tool=tool_receipt)
+            if not pending:
+                return
+            event.set_extra(SENT_KEY, True)
+            trace = event.get_extra(TRACE_KEY, {})
             await self.runtime.record_delivery(
                 source, reply, trace, epoch=trace.get("epoch")
             )
@@ -1036,6 +1091,19 @@ class PersonaManagerPlugin(Star):
         except Exception:
             logger.warning("[可可子人格] 管理视图读取失败。")
             return error_response("读取失败，请检查插件日志", status_code=500)
+
+    async def page_trials(self):
+        if not request.username:
+            return error_response("需要登录 AstrBot 管理面板", status_code=403)
+        groups = await self.runtime.db("known_groups")
+        return json_response(
+            self.group_trials.history.page(
+                self.settings(),
+                groups,
+                request.query.get("scope", ""),
+                request.query.get("turn", ""),
+            )
+        )
 
     async def page_seed(self):
         if not request.username:
