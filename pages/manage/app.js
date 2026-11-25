@@ -827,7 +827,7 @@ function renderOverview() {
   details.replaceChildren();
   const status = object(state.status);
   const capture = object(status.capture);
-  addMeta(details, "运行版本", `${status.runtime_version ? `v${status.runtime_version}` : "未知"} / 页面 v2.6.1`);
+  addMeta(details, "运行版本", `${status.runtime_version ? `v${status.runtime_version}` : "未知"} / 页面 v2.7.0`);
   addMeta(details, "已采集原文", countText(status.sources));
   addMeta(details, "待整理对话", countText(status.pending_interactions));
   addMeta(details, "生效记忆", countText(status.memories));
@@ -1246,6 +1246,23 @@ function simThread(model = byId("sim-model").value, persona = selectedPersona) {
   return JSON.stringify([persona, model, model === "configured" ? state?.config?.values?.local_chat_provider_id : ""]);
 }
 
+function simTiming(timing, running = false) {
+  if (!timing) return "";
+  const parts = [];
+  if (timing.load_mode === "cold") parts.push("冷启动");
+  if (timing.load_mode === "resident") parts.push("已驻留");
+  for (const [label, ms] of [
+    ["准备", timing.prepare_ms], ["加载", timing.load_ms],
+    ["首字", timing.first_text_ms], [running ? "已用时" : "总耗时", timing.elapsed_ms],
+  ]) {
+    if (Number.isFinite(ms)) {
+      const duration = ms < 1000 ? `${ms} 毫秒` : `${(ms / 1000).toFixed(2)} 秒`;
+      parts.push(`${label} ${duration}`);
+    }
+  }
+  return parts.join(" · ");
+}
+
 function simControls() {
   const blocked = busy || !ready || simWaiting || simOtherBusy || Boolean(simJob);
   const model = byId("sim-model").value;
@@ -1268,8 +1285,8 @@ function renderSim() {
   const model = byId("sim-model").value;
   const key = simThread();
   byId("sim-model-note").textContent = model === "configured"
-    ? "自定义模型的加载和释放由其提供商管理。"
-    : "可提前加载，也可直接发送。首次加载会下载权重，切换时先释放已驻留的模型。";
+    ? "自定义模型由提供商管理，整段回复返回后显示总耗时。"
+    : "首次加载会下载权重，切换时先释放已驻留的模型。首字和总耗时均从服务端接到本轮任务开始计算。";
   const list = byId("sim-messages");
   const atEnd = list.scrollHeight - list.scrollTop - list.clientHeight < 48;
   list.replaceChildren();
@@ -1282,6 +1299,7 @@ function renderSim() {
   for (const turn of turns) {
     const row = node("div", "", `sim-message ${turn.role}`);
     row.append(node("strong", turn.role === "user" ? "你" : selectedPersona), node("p", turn.content));
+    if (turn.timing) row.append(node("small", simTiming(turn.timing), "sim-timing"));
     list.append(row);
   }
   if (atEnd) list.scrollTop = list.scrollHeight;
@@ -1294,6 +1312,10 @@ function renderSimStatus() {
   const detail = simJob?.detail || simNotice;
   if (byId("sim-resident").textContent !== residency) byId("sim-resident").textContent = residency;
   if (byId("sim-status").textContent !== detail) byId("sim-status").textContent = detail;
+  const timing = byId("sim-timing");
+  const elapsed = simTiming(simJob?.timing, true);
+  if (timing.textContent !== elapsed) timing.textContent = elapsed;
+  timing.hidden = !elapsed;
   simControls();
 }
 
@@ -1311,12 +1333,12 @@ function acceptSim(job) {
     simTimer = null;
     if (isChat && job.status === "done" && job.answer?.trim()) {
       const turns = simChats.get(simKey) || [];
-      turns.push({role: "user", content: job.question}, {role: "assistant", content: job.answer.trim()});
+      turns.push({role: "user", content: job.question}, {role: "assistant", content: job.answer.trim(), timing: job.timing});
       simChats.set(simKey, turns.slice(-60));
       simNotice = `已使用${job.prompt_source}，本轮由 ${job.model === "configured" ? "自定义模型" : job.model} 回复。`;
     } else {
       if (isChat && simKey === simThread()) byId("sim-input").value = job.question;
-      simNotice = job.detail || "操作结束";
+      simNotice = [job.detail || "操作结束", simTiming(job.timing)].filter(Boolean).join(" · ");
     }
     simJob = null;
   }
@@ -1332,7 +1354,7 @@ async function pollSim(id) {
     if (simJob?.id !== id) return;
     const detail = error?.message || "读取生成进度失败";
     if (error?.status === 404 || /过期|不存在|需要登录/.test(detail)) {
-      acceptSim({...simJob, status: "error", detail});
+      acceptSim({...simJob, status: "error", detail, timing: null});
     } else {
       simJob.detail = `${detail}，正在重新连接…`;
       renderSim();
@@ -1394,7 +1416,7 @@ byId("sim-form").addEventListener("submit", async (event) => {
   if (!ready || busy || simJob || simWaiting || simOtherBusy || !message || !model) return;
   ++simEpoch;
   simKey = simThread();
-  const history = (simChats.get(simKey) || []).slice(-12);
+  const history = (simChats.get(simKey) || []).slice(-12).map(({role, content}) => ({role, content}));
   simJob = {model, question: message, detail: "正在提交…"};
   simWaiting = true;
   simNotice = "";

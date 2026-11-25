@@ -169,7 +169,16 @@ test("an active reply finishes in the background without rendering while editing
 });
 
 test("simulation keeps independent multi-turn chats when switching between 2B and 8B", async () => {
-  const ui = page({simulation: simulateModels()});
+  const simulate = simulateModels();
+  const ui = page({simulation: payload => {
+    const result = simulate(payload);
+    if (payload.action === "send") {
+      result.timing = payload.history.length
+        ? {load_mode: "resident", first_text_ms: 0, elapsed_ms: 870}
+        : {load_mode: "cold", prepare_ms: 1250, load_ms: 2500, first_text_ms: 4010, elapsed_ms: 5030};
+    }
+    return result;
+  }});
   await flush();
   const el = id => ui.elements.get(id);
   const select = async name => {
@@ -183,6 +192,11 @@ test("simulation keeps independent multi-turn chats when switching between 2B an
   await send("大模型第一轮");
   await select("Qwen3.5-2B");
   await send("继续刚才的话");
+  const log = textOf(el("sim-messages"));
+  assert.match(log, /冷启动 · 准备 1\.25 秒 · 加载 2\.50 秒 · 首字 4\.01 秒 · 总耗时 5\.03 秒/);
+  assert.match(log, /已驻留 · 首字 0 毫秒 · 总耗时 870 毫秒/);
+  assert.doesNotMatch(log, /大模型第一轮/);
+  assert.equal(ui.timers.size, 0);
   const chats = ui.posts.filter(p => p.payload.action === "send");
   assert.deepEqual(chats[1].payload.history, []);
   assert.deepEqual(chats[2].payload.history, [{role:"user",content:"小模型第一轮"},{role:"assistant",content:"收到"}]);
@@ -194,7 +208,12 @@ test("simulation keeps independent multi-turn chats when switching between 2B an
 });
 
 test("manual load and release update residency without changing the draft or chat", async () => {
-  const ui = page({simulation: simulateModels()});
+  const simulate = simulateModels();
+  const ui = page({simulation: payload => {
+    const result = simulate(payload);
+    if (result.job) result.job.timing = {elapsed_ms: 750};
+    return result;
+  }});
   await flush();
   const el = id => ui.elements.get(id);
   el("sim-input").value = "还没发送的草稿";
@@ -204,16 +223,39 @@ test("manual load and release update residency without changing the draft or cha
   await engineButton.handlers.click();
   assert.equal(el("sim-input").value, "还没发送的草稿");
   assert.match(el("sim-resident").textContent, /Qwen3\.5-2B/);
+  assert.match(el("sim-status").textContent, /模型已加载 · 总耗时 750 毫秒/);
   assert.equal(engineButton.textContent, "释放模型");
   assert.match(textOf(el("sim-messages")), /第一条消息/);
   await el("sim-form").handlers.submit({preventDefault() {}});
   await engineButton.handlers.click();
   assert.match(el("sim-resident").textContent, /没有已加载/);
+  assert.match(el("sim-status").textContent, /模型已释放 · 总耗时 750 毫秒/);
   assert.match(textOf(el("sim-messages")), /还没发送的草稿/);
   assert.equal(engineButton.textContent, "加载模型");
   el("sim-model").value = "configured";
   await el("sim-model").handlers.change();
   assert.equal(engineButton.hidden, true);
+});
+
+test("a configured provider shows only its completed round time across manual refresh", async () => {
+  const simulate = simulateModels();
+  const ui = page({simulation: payload => {
+    const result = simulate(payload);
+    if (payload.action === "send") result.timing = {load_mode: null, prepare_ms: null, load_ms: null, first_text_ms: null, elapsed_ms: 1234};
+    return result;
+  }});
+  await flush();
+  const el = id => ui.elements.get(id);
+  ui.view.config.values.local_chat_provider_id = "my-model";
+  ui.view.simulation_models.push({id: "configured", label: "自定义模型"});
+  await el("refresh").handlers.click();
+  el("sim-model").value = "configured";
+  await el("sim-model").handlers.change();
+  el("sim-input").value = "试一下";
+  await el("sim-form").handlers.submit({preventDefault() {}});
+  await el("refresh").handlers.click();
+  assert.equal(el("sim-messages").children.at(-1).children.at(-1).textContent, "总耗时 1.23 秒");
+  assert.equal(ui.timers.size, 0);
 });
 
 test("an old status response cannot undo a manual load and a foreign job locks the controls", async () => {
@@ -241,17 +283,20 @@ test("an old status response cannot undo a manual load and a foreign job locks t
 test("simulation shows preparation progress, blocks duplicates and restores cancelled input", async () => {
   const base = {id: "pending", model: "Qwen3-8B", question: "试一下"};
   const ui = page({simulation: p => p.action === "cancel"
-    ? {...base, status: "cancelled", detail: "已停止"}
-    : {...base, status: "running", detail: "下载模型 · 30%"}});
+    ? {...base, status: "cancelled", detail: "已停止", timing: {elapsed_ms: 4100}}
+    : {...base, status: "running", detail: "下载模型 · 30%", timing: {elapsed_ms: 3200, first_text_ms: null}}});
   await flush();
   const el = id => ui.elements.get(id);
   el("sim-model").value = base.model; el("sim-input").value = base.question;
   await el("sim-form").handlers.submit({preventDefault(){}});
   assert.equal(el("sim-model").disabled, true);
   assert.match(el("sim-status").textContent, /30%/);
+  assert.equal(el("sim-timing").textContent, "已用时 3.20 秒");
   await el("sim-form").handlers.submit({preventDefault(){}});
   assert.equal(ui.posts.length, 1);
   await el("sim-stop").handlers.click();
+  assert.equal(el("sim-timing").hidden, true);
+  assert.match(el("sim-status").textContent, /已停止 · 总耗时 4\.10 秒/);
   assert.equal(el("sim-input").value, base.question);
   assert.equal(el("sim-model").disabled, false);
   assert.equal(el("sim-clear").disabled, true);
@@ -723,7 +768,7 @@ test("overview separates captured dialogue, pending extraction and stored memory
   ui.view.schedule = { state: "budget", reason: "预计 20009 tokens，单次上限 20000 tokens", groups: [] };
   await vm.runInContext("loadState()", ui.sandbox);
   const detail = textOf(ui.elements.get("schedule-details"));
-  assert.match(detail, /运行版本：v2\.2\.1 \/ 页面 v2\.6\.1/);
+  assert.match(detail, /运行版本：v2\.2\.1 \/ 页面 v2\.7\.0/);
   assert.match(detail, /已采集原文：24/);
   assert.match(detail, /待整理对话：20/);
   assert.match(detail, /生效记忆：0/);
@@ -762,7 +807,7 @@ test("empty learning calls explain zero capture, paused and disabled learning wi
 test("legacy overview diagnostics remain unknown and translate active scheduler states", async () => {
   const ui = page(); await flush();
   const detail = textOf(ui.elements.get("schedule-details"));
-  assert.match(detail, /运行版本：未知 \/ 页面 v2\.6\.1/);
+  assert.match(detail, /运行版本：未知 \/ 页面 v2\.7\.0/);
   assert.match(detail, /已采集原文：—/);
   assert.match(detail, /待整理对话：—/);
   assert.match(detail, /待确认记忆：—/);

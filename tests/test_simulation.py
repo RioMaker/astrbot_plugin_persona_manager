@@ -3,7 +3,7 @@ import hashlib
 import select
 import subprocess
 import sys
-from contextlib import AsyncExitStack
+from contextlib import AsyncExitStack, asynccontextmanager
 from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import AsyncMock, Mock
@@ -58,6 +58,70 @@ def native_engines(monkeypatch):
 
     monkeypatch.setattr(simulation, "_open_engine", open_engine)
     return engines
+
+
+def test_timing_tracks_visible_stream_text_and_freezes_at_completion(
+    tmp_path, monkeypatch
+):
+    clock = Mock(return_value=100.0)
+    monkeypatch.setattr(simulation, "time", SimpleNamespace(monotonic=clock))
+    sim = simulation.Simulation(tmp_path, None)
+    model = next(iter(simulation.MODELS))
+
+    async def prepare(*args):
+        clock.return_value += 2.0
+        assert sim.active.timing()["prepare_ms"] == 2000
+        return "engine", "weights"
+
+    async def events():
+        clock.return_value += 0.25
+        yield b'data: {"choices":[{"delta":{"role":"assistant"}}]}'
+        yield b'data: {"choices":[{"delta":{"reasoning_content":"thinking"}}]}'
+        yield b'data: {"choices":[{"delta":{"content":" "}}]}'
+        assert sim.active.timing()["first_text_ms"] is None
+        clock.return_value += 0.25
+        yield b'data: {"choices":[{"delta":{"content":"Hi"}}]}'
+        clock.return_value += 0.75
+        yield b'data: {"choices":[{"delta":{"content":"!"}}]}'
+        yield b"data: [DONE]"
+
+    @asynccontextmanager
+    async def post(*args, **kwargs):
+        yield SimpleNamespace(status=200, content=events())
+
+    async def open_engine(*args):
+        clock.return_value += 3.0
+        assert sim.active.timing()["load_ms"] == 3000
+        return simulation.ResidentEngine(
+            model,
+            SimpleNamespace(returncode=None),
+            SimpleNamespace(post=post),
+            AsyncExitStack(),
+        )
+
+    monkeypatch.setattr(sim.files, "prepare", prepare)
+    monkeypatch.setattr(simulation, "_open_engine", open_engine)
+
+    async def run():
+        for cold in (True, False):
+            start = sim.start(
+                "admin", model, [{"role": "user", "content": "hi"}], "P", "S", "S", None
+            )
+            assert start["timing"]["elapsed_ms"] == 0
+            await sim.task
+            clock.return_value += 20  # The dashboard can poll long after completion.
+            result = sim.find("admin", start["id"]).view(sim.loaded_model)
+            assert result["answer"] == " Hi!" and result["status"] == "done"
+            assert result["timing"] == {
+                "load_mode": "cold" if cold else "resident",
+                "prepare_ms": 2000 if cold else None,
+                "load_ms": 3000 if cold else None,
+                "first_text_ms": 5500 if cold else 500,
+                "elapsed_ms": 6250 if cold else 1250,
+            }
+        await sim.close()
+
+    asyncio.run(run())
 
 
 def test_cancelling_while_the_native_engine_starts_reaps_the_child(monkeypatch):
@@ -159,7 +223,13 @@ def test_simulation_access_isolation_switching_and_history(
                 action="send", model="configured", message="试试", history=history
             )
             await plugin.simulation.task
-            assert (await api(action="poll", id=job["id"]))["answer"] == "自定义回答"
+            result = await api(action="poll", id=job["id"])
+            assert result["answer"] == "自定义回答"
+            assert result["timing"]["elapsed_ms"] >= 0
+            assert all(
+                result["timing"][key] is None
+                for key in ("load_mode", "prepare_ms", "load_ms", "first_text_ms")
+            )
             args = env.context.llm_generate.await_args.kwargs
             assert args["chat_provider_id"] == "my-tuned-model"
             assert args["contexts"] == history and args["tools"] is None
@@ -201,6 +271,8 @@ def test_manual_load_release_and_warm_messages(entry, monkeypatch, native_engine
             loaded = await finish((await api("load", model=small))["job"])
             assert loaded["loaded_model"] == small and loaded["operation"] == "load"
             assert loaded["answer"] == "" and loaded["question"] == ""
+            assert loaded["timing"]["load_ms"] is not None
+            assert loaded["timing"]["first_text_ms"] is None
             assert (await env.plugin.page_state())["simulation_loaded_model"] == small
             assert (await api("load", model=small))["job"] is None
             for question in ("你好", "再聊一句"):
@@ -217,6 +289,8 @@ def test_manual_load_release_and_warm_messages(entry, monkeypatch, native_engine
             assert sim.loaded_model == large
             released = await finish((await api("unload", model=large))["job"])
             assert released["loaded_model"] is None
+            assert released["timing"]["elapsed_ms"] >= 0
+            assert released["timing"]["load_ms"] is None
             assert (await api("unload", model=large))["job"] is None
             await finish(await api("send", model=large, message="再加载"))
             assert len(native_engines) == 3
@@ -259,7 +333,9 @@ def test_cancel_reply_keeps_engine_and_cancel_switch_finishes_release(
             )
             await generating.wait()
             await sim.stop()
-            assert sim.find("admin", chat["id"]).status == "cancelled"
+            stopped = sim.find("admin", chat["id"])
+            assert stopped.status == "cancelled" and stopped.finished is not None
+            assert stopped.timing()["first_text_ms"] is None
             assert sim.loaded_model == small
 
             async def wait_for_release():
@@ -284,6 +360,11 @@ def test_cancel_reply_keeps_engine_and_cancel_switch_finishes_release(
             failed = sim.active
             await sim.task
             assert failed.status == "error" and "磁盘" in failed.detail
+            assert (
+                failed.finished is not None
+                and failed.timing()["prepare_ms"] is not None
+            )
+            assert failed.timing()["load_ms"] is None
             assert (
                 sim.loaded_model is None and native_engines[-1].process.returncode == 0
             )
@@ -320,6 +401,9 @@ def test_simulation_validation_cancel_and_persona_fallback(entry):
             assert job["prompt_source"] == "推荐人格底稿"
             result = await api(action="cancel", id=job["id"])
             assert result["status"] == "cancelled"
+            assert result["timing"]["elapsed_ms"] >= 0
+            assert result["timing"]["first_text_ms"] is None
+            assert env.plugin.simulation.jobs[job["id"]].finished is not None
             assert env.plugin.simulation.active is None
             env.context.llm_generate.assert_not_called()
 

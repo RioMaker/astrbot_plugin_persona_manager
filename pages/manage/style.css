@@ -44,6 +44,9 @@
 .sim-message.user { align-self: flex-end; background: var(--accent-soft); }
 .sim-message strong { display: block; color: var(--muted); font-size: 11px; }
 .sim-message p { margin: 2px 0 0; }
+.sim-timing { color: var(--muted); font-size: 12px; font-variant-numeric: tabular-nums; }
+.sim-message .sim-timing { display: block; margin-top: 5px; }
+#sim-timing { margin: -4px 0 8px; }
 #sim-status { min-height: 1.6em; margin: 8px 0; overflow-wrap: anywhere; }
 @media (max-width: 600px) { .sim-composer { flex-direction: column; align-items: stretch; } .sim-composer .item-actions { justify-content: flex-end; } }
 body { margin: 0; background: var(--bg); color: var(--text); font: 14px/1.65 system-ui, -apple-system, "Segoe UI", "Microsoft YaHei", sans-serif; }

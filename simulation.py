@@ -61,11 +61,38 @@ class Job:
     status: str = "running"
     detail: str = "准备模拟对话"
     answer: str = ""
-    finished: float = 0
+    started: float = field(default_factory=lambda: time.monotonic())
+    load_mode: str | None = None
+    prepare_started: float | None = None
+    load_started: float | None = None
+    ready_at: float | None = None
+    first_text_at: float | None = None
+    finished: float | None = None
     stopping: bool = False
 
     def progress(self, detail):
         self.detail = detail
+
+    def timing(self):
+        end = self.finished if self.finished is not None else time.monotonic()
+
+        def milliseconds(start, stop):
+            if start is not None and stop is not None:
+                return round((stop - start) * 1000)
+            return None
+
+        return {
+            "load_mode": self.load_mode,
+            "elapsed_ms": milliseconds(self.started, end),
+            "prepare_ms": milliseconds(
+                self.prepare_started,
+                self.load_started if self.load_started is not None else end,
+            ),
+            "load_ms": milliseconds(
+                self.load_started, self.ready_at if self.ready_at is not None else end
+            ),
+            "first_text_ms": milliseconds(self.started, self.first_text_at),
+        }
 
     def view(self, loaded_model):
         return {
@@ -79,6 +106,7 @@ class Job:
             "status": self.status,
             "detail": self.detail,
             "answer": self.answer,
+            "timing": self.timing(),
         }
 
 
@@ -128,7 +156,7 @@ class Simulation:
         if (
             job is None
             or job.owner != owner
-            or (job.finished and time.monotonic() - job.finished >= 900)
+            or (job.finished is not None and time.monotonic() - job.finished >= 900)
         ):
             raise ValueError("模拟任务已过期或不存在")
         return job
@@ -168,7 +196,11 @@ class Simulation:
 
     def _submit(self, job, messages=(), system="", provider=""):
         now = time.monotonic()
-        self.jobs = {k: v for k, v in self.jobs.items() if now - v.finished < 900}
+        self.jobs = {
+            k: v
+            for k, v in self.jobs.items()
+            if v.finished is None or now - v.finished < 900
+        }
         while len(self.jobs) >= 8:
             self.jobs.pop(next(iter(self.jobs)))
         self.jobs[job.id] = self.active = job
@@ -179,16 +211,21 @@ class Simulation:
         # Cancellation before _run's first instruction must also release the slot.
         if task.cancelled():
             job.status, job.detail = "cancelled", "已停止"
-        job.finished = time.monotonic()
+            job.finished = time.monotonic()
         self.active = None
 
     async def _load(self, job):
         if self.loaded_model == job.model:
+            job.load_mode = "resident"
             return self.engine
+        job.load_mode = "cold"
         await self._release(job)
+        job.prepare_started = time.monotonic()
         binary, weights = await self.files.prepare(job.model, job.progress)
+        job.load_started = time.monotonic()
         job.progress(f"正在加载 {job.model}")
         self.engine = await _open_engine(job.model, binary, weights)
+        job.ready_at = time.monotonic()
         return self.engine
 
     async def _release(self, job=None):
@@ -257,6 +294,8 @@ class Simulation:
                 "error",
                 f"模拟调用失败（{type(exc).__name__}），请检查模型服务、磁盘余量或网络后重试",
             )
+        finally:
+            job.finished = time.monotonic()
 
     async def stop(self):
         task, job = self.task, self.active
@@ -400,5 +439,8 @@ async def _stream(client, system, messages, job):
                 if "error" in chunk:
                     raise ValueError("模型生成中断，请重试")
                 for choice in chunk.get("choices", []):
-                    job.answer += choice.get("delta", {}).get("content") or ""
+                    content = choice.get("delta", {}).get("content") or ""
+                    if job.first_text_at is None and content.strip():
+                        job.first_text_at = time.monotonic()
+                    job.answer += content
             raise ValueError("服务在回复完成前断开，请重试")
