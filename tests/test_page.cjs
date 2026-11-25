@@ -41,6 +41,7 @@ function page(options = {}) {
       append(...children) { this.children.push(...children); },
       replaceChildren(...children) { this.children = children; },
       addEventListener(name, handler) { this.handlers[name] = handler; },
+      dispatchEvent(event) { this.handlers[event.type]?.(event); },
       showModal() { this.open = true; }, close() { this.open = false; },
     };
     Object.defineProperty(result, "id", { set(value) { this._id = value; elements.set(value, this); }, get() { return this._id; } });
@@ -52,10 +53,14 @@ function page(options = {}) {
       return elements.get(id);
     },
     querySelectorAll: () => [],
+    querySelector: () => null,
     createElement: element,
   };
+  class PageEvent {
+    constructor(type, {detail} = {}) { this.type = type; this.detail = detail; }
+  }
   const sandbox = vm.createContext({
-    document, Intl, Date, console,
+    document, Intl, Date, console, Event: PageEvent, CustomEvent: PageEvent,
     window: {
       setTimeout: callback => schedule(callback, false),
       setInterval: callback => schedule(callback, true),
@@ -876,7 +881,7 @@ test("overview separates captured dialogue, pending extraction and stored memory
   ui.view.schedule = { state: "budget", reason: "预计 20009 tokens，单次上限 20000 tokens", groups: [] };
   await vm.runInContext("loadState()", ui.sandbox);
   const detail = textOf(ui.elements.get("schedule-details"));
-  assert.match(detail, /运行版本：v2\.2\.1 \/ 页面 v2\.11\.0/);
+  assert.match(detail, /运行版本：v2\.2\.1 \/ 页面 v2\.11\.1/);
   assert.match(detail, /已采集原文：24/);
   assert.match(detail, /待整理对话：20/);
   assert.match(detail, /生效记忆：0/);
@@ -915,7 +920,7 @@ test("empty learning calls explain zero capture, paused and disabled learning wi
 test("legacy overview diagnostics remain unknown and translate active scheduler states", async () => {
   const ui = page(); await flush();
   const detail = textOf(ui.elements.get("schedule-details"));
-  assert.match(detail, /运行版本：未知 \/ 页面 v2\.11\.0/);
+  assert.match(detail, /运行版本：未知 \/ 页面 v2\.11\.1/);
   assert.match(detail, /已采集原文：—/);
   assert.match(detail, /待整理对话：—/);
   assert.match(detail, /待确认记忆：—/);
@@ -1030,6 +1035,29 @@ test("disabling one connection preserves another connection and unrelated legacy
   assert.equal(ui.elements.get("group-observation-qq-second-234567").checked, true);
   await ui.elements.get("settings-form").handlers.submit({ preventDefault() {} });
   assert.deepEqual(ui.posts[0].payload.values.observation_groups, ["777888", "qq-second:234567"]);
+});
+
+test("settings opens trial history for the saved connection and preserves an unsaved draft", async () => {
+  const ui = page(); await flush();
+  const model = "bailian:ws-test:qwen3-8b-d39bed90dfab";
+  ui.view.simulation_models.push({id: model, group_trial_label: "群聊微调 8B"});
+  ui.view.groups = [knownGroup(), knownGroup("qq-second")];
+  ui.view.config.values.bailian_group_models = ["qq-second:234567=" + model];
+  await vm.runInContext("loadState()", ui.sandbox);
+  const pending = ui.elements.get("group-trial-qq-main-234567");
+  pending.value = model; pending.handlers.change();
+  const opens = [];
+  ui.sandbox.document.getElementById("panel-trials").addEventListener("trials-open", event => opens.push(event.detail));
+  const buttons = ui.elements.get("group-list").children.flatMap(function walk(el) {
+    return [el, ...el.children.flatMap(walk)];
+  }).filter(el => el.textContent === "查看本群调用");
+  assert.equal(buttons.length, 1);
+  buttons[0].handlers.click();
+  ui.elements.get("open-group-trials").handlers.click();
+  assert.deepEqual(opens, ["qq-second:234567", ""]);
+  assert.equal(ui.elements.get("group-trial-qq-main-234567").value, model);
+  assert.equal(ui.posts.length, 0);
+  assert.equal(ui.reads.includes("trials"), false);
 });
 
 test("memory switch clears only the matching legacy exclusion", async () => {

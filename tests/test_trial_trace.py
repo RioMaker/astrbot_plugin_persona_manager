@@ -5,6 +5,7 @@ from types import SimpleNamespace
 from unittest.mock import AsyncMock, Mock
 
 from astrbot_plugin_persona_manager import simulation_bailian
+from astrbot_plugin_persona_manager.deploy.build_trial_panel import OUTPUT, build
 from astrbot_plugin_persona_manager.settings import BAILIAN_GROUP_CHAT_MODEL, Settings
 from astrbot_plugin_persona_manager.tests.astrbot_stub import MockEvent
 from astrbot_plugin_persona_manager.tests.test_integration import entry as entry
@@ -17,6 +18,10 @@ from astrbot_plugin_persona_manager.trial_trace import (
     PER_GROUP,
     TrialHistory,
 )
+
+
+def test_embedded_panel_matches_the_standalone_trace_view():
+    assert OUTPUT.read_text(encoding="utf-8") == build()
 
 
 def test_page_tracks_an_authorized_turn_independently_of_learning(entry, monkeypatch):

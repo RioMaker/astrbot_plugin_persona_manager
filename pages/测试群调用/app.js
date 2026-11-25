@@ -1,4 +1,6 @@
-const byId = (id) => document.getElementById(id);
+const panel = document.getElementById("panel-trials");
+const root = panel?.shadowRoot || document;
+const byId = (id) => root.getElementById(id);
 const bridge = window.AstrBotPluginPage;
 const format = new Intl.NumberFormat("zh-CN");
 const dates = new Intl.DateTimeFormat("zh-CN", {
@@ -17,6 +19,8 @@ let detailId = "";
 let lastDetail = "";
 let groupSignature = "";
 let lastTurns = "";
+let active = !panel;
+let connected = false;
 
 function el(tag, text = "", className = "") {
   const element = document.createElement(tag);
@@ -43,8 +47,8 @@ function clearDetail() {
   byId("detail").replaceChildren();
 }
 
-function selectGroup() {
-  scope = byId("group").value;
+function selectGroup(nextScope) {
+  scope = nextScope;
   turnId = "";
   lastTurns = "";
   byId("turns").replaceChildren();
@@ -159,10 +163,11 @@ function notice(text, error = false) {
 
 function schedule() {
   window.clearTimeout(timer);
-  if (byId("auto").checked && !document.hidden) timer = window.setTimeout(refresh, 5000);
+  if (active && connected && byId("auto").checked && !document.hidden) timer = window.setTimeout(refresh, 5000);
 }
 
 async function refresh() {
+  if (!active || !connected) return;
   const version = ++revision;
   window.clearTimeout(timer);
   try {
@@ -203,12 +208,23 @@ async function start() {
     notice(error?.message || "连接 Dashboard 失败。", true);
     return;
   }
+  connected = true;
   byId("refresh").disabled = false;
   byId("refresh").addEventListener("click", refresh);
-  byId("group").addEventListener("change", selectGroup);
+  byId("group").addEventListener("change", () => selectGroup(byId("group").value));
   byId("auto").addEventListener("change", schedule);
   document.addEventListener("visibilitychange", schedule);
   await refresh();
 }
 
+panel?.addEventListener("trials-open", (event) => {
+  active = true;
+  if (event.detail && event.detail !== scope) selectGroup(event.detail);
+  else void refresh();
+});
+panel?.addEventListener("trials-close", () => {
+  active = false;
+  revision++;
+  window.clearTimeout(timer);
+});
 void start();

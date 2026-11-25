@@ -47,7 +47,7 @@ except ModuleNotFoundError as exc:
     from .legacy_web import error_response, json_response, request
 
 PLUGIN_NAME = "astrbot_plugin_persona_manager"
-PLUGIN_VERSION = "2.11.0"
+PLUGIN_VERSION = "2.11.1"
 GATE_NAME = "astrbot_plugin_access_gate"
 PENDING_KEY = PLUGIN_NAME + ":interaction"
 SENT_KEY = PLUGIN_NAME + ":sent"

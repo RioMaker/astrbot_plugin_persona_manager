@@ -5,7 +5,7 @@
     <meta name="viewport" content="width=device-width, initial-scale=1" />
     <meta name="color-scheme" content="light dark" />
     <title>可可子 · 人格管理</title>
-    <link rel="stylesheet" href="./style.css?v=2.11.0" />
+    <link rel="stylesheet" href="./style.css?v=2.11.1" />
   </head>
   <body>
     <main class="shell" id="app" aria-busy="true">
@@ -36,6 +36,7 @@
       <nav class="tabs" aria-label="管理内容">
         <button type="button" class="tab active" data-panel="overview" aria-current="page">学习总览</button>
         <button type="button" class="tab" data-panel="settings">设置与方向 <span id="settings-tab-dot" hidden>●</span></button>
+        <button type="button" class="tab" data-panel="trials">测试群调用</button>
         <button type="button" class="tab" data-panel="simulation">模拟对话</button>
         <button type="button" class="tab" data-panel="core">核心人设</button>
         <button type="button" class="tab" data-panel="memory">用户记忆</button>
@@ -88,6 +89,8 @@
         </article>
       </section>
 
+      <section id="panel-trials" aria-label="测试群调用" hidden></section>
+
       <section id="panel-settings" aria-labelledby="settings-title" hidden>
         <div class="section-heading"><div><h2 id="settings-title">记忆系统设置</h2><p class="muted">从对话积累到记忆留存，按流程调整每一步。</p></div><span id="settings-count" class="count">载入配置中</span></div>
         <div id="config-conflict" class="notice error" role="alert" hidden>后台配置已有变化。草稿已保留，请重载最新配置并核对后再编辑。</div>
@@ -102,7 +105,7 @@
             <div id="settings-sections" class="settings-sections"></div>
           </div>
           <article id="settings-group-picker" class="group-picker" aria-labelledby="group-picker-title" hidden>
-            <div class="item-header"><div><h3 id="group-picker-title">各群的模型与学习设置</h3><p class="muted small">百炼测试默认关闭，启用后优先于本群勾选的本地模型。保存后可在插件详情的“测试群调用”查看提示词、工具和用量。</p></div><span id="group-count" class="count">0 个群</span></div>
+            <div class="item-header"><div><h3 id="group-picker-title">各群的模型与学习设置</h3><p class="muted small">百炼测试默认关闭，启用后优先于本群勾选的本地模型。修改后请保存设置。</p></div><div class="item-actions"><span id="group-count" class="count">0 个群</span><button type="button" id="open-group-trials">查看测试群调用</button></div></div>
             <div class="group-filters"><div class="field grow"><label for="group-search">搜索群</label><input id="group-search" type="search" placeholder="群名、群号、连接或标签" autocomplete="off" /></div><div class="field"><label for="group-filter">显示范围</label><select id="group-filter"><option value="all">所有已发现的群</option><option value="selected">已开启功能</option><option value="unselected">所有开关均关闭</option></select></div></div>
             <p id="group-learning-note" class="muted small"></p>
             <div id="group-list" class="group-list" aria-live="polite"></div>
@@ -232,6 +235,7 @@
       <div id="memory-detail-fields"></div><p id="memory-detail-error" class="field-error" role="alert"></p>
       <div class="dialog-actions"><button id="memory-detail-cancel" type="button">取消</button><button type="submit" class="primary">保存修改</button></div>
     </form></dialog>
-    <script type="module" src="./app.js?v=2.11.0"></script>
+    <script type="module" src="./trials.js?v=2.11.1"></script>
+    <script type="module" src="./app.js?v=2.11.1"></script>
   </body>
 </html>

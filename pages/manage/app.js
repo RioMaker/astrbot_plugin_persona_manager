@@ -477,6 +477,14 @@ function groupTrialField(group, selected, models) {
     byId(select.id)?.focus();
   });
   field.append(label, select);
+  const scope = `${group.platform_id}:${group.group_id}`;
+  const saved = array(configBase.bailian_group_models).filter((entry) => entry.startsWith(scope + "="));
+  if (saved.length === 1 && models.some((model) => saved[0] === `${scope}=${model.id}`)) {
+    const view = node("button", "查看本群调用");
+    view.type = "button";
+    view.addEventListener("click", () => showPanel("trials", scope));
+    field.append(view);
+  }
   const chosen = models.find((model) => model.id === selected);
   if (selected && !chosen) field.append(node("p", "该部署已移出当前试聊列表，群聊使用原群模型。", "field-hint"));
   else if (chosen?.unavailable_reason) field.append(node("p", chosen.unavailable_reason, "field-hint"));
@@ -866,7 +874,7 @@ function renderOverview() {
   details.replaceChildren();
   const status = object(state.status);
   const capture = object(status.capture);
-  addMeta(details, "运行版本", `${status.runtime_version ? `v${status.runtime_version}` : "未知"} / 页面 v2.11.0`);
+  addMeta(details, "运行版本", `${status.runtime_version ? `v${status.runtime_version}` : "未知"} / 页面 v2.11.1`);
   addMeta(details, "已采集原文", countText(status.sources));
   addMeta(details, "待整理对话", countText(status.pending_interactions));
   addMeta(details, "生效记忆", countText(status.memories));
@@ -1527,19 +1535,27 @@ byId("sim-stop").addEventListener("click", async () => {
   }
 });
 
-function showPanel(name) {
+function showPanel(name, trialScope = "") {
   document.querySelectorAll("[data-panel]").forEach((tab) => {
     const active = tab.dataset.panel === name;
     tab.classList.toggle("active", active);
     if (active) tab.setAttribute("aria-current", "page"); else tab.removeAttribute("aria-current");
     byId(`panel-${tab.dataset.panel}`).hidden = !active;
   });
+  const trialPanel = byId("panel-trials");
+  if (name === "trials") {
+    trialPanel.dispatchEvent(new CustomEvent("trials-open", {detail: trialScope}));
+    document.querySelector('[data-panel="trials"]')?.focus();
+  } else {
+    trialPanel.dispatchEvent(new Event("trials-close"));
+  }
   if (name === "simulation") {
     renderSim();
     void recoverSim(true);
   }
 }
 
+byId("open-group-trials").addEventListener("click", () => showPanel("trials"));
 document.querySelectorAll("[data-panel]").forEach((button) => {
   button.addEventListener("click", () => showPanel(button.dataset.panel));
 });
