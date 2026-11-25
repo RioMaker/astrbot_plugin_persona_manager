@@ -88,7 +88,7 @@
   "bailian_model_codes": {
     "type": "list",
     "description": "百炼试聊模型",
-    "default": ["qwen3-4b-instruct-2507-438f534673d5-v1"],
+    "default": ["qwen3-4b-instruct-2507-438f534673d5-v1", "qwen3-8b-d39bed90dfab"],
     "hint": "每行填写一个已部署的文本对话模型调用 ID（ModelCode），保存后即可在模拟对话中选择。清空列表可隐藏百炼选项。"
   },
   "learning_provider_id": {

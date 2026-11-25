@@ -179,7 +179,13 @@ class Simulation:
                 {
                     "id": f"bailian:{settings.bailian_workspace_id}:{code}",
                     "kind": "bailian",
-                    "label": f"阿里云百炼 · {code}",
+                    "label": (
+                        "阿里云百炼 · 群聊微调 Qwen3-8B v2"
+                        if simulation_bailian.is_group_chat_v2(
+                            settings.bailian_workspace_id, code
+                        )
+                        else f"阿里云百炼 · {code}"
+                    ),
                     "unavailable_reason": reason,
                 }
                 for code in sorted(settings.bailian_model_codes)

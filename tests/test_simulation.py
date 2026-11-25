@@ -173,6 +173,7 @@ def test_simulation_access_isolation_switching_and_history(
                 "local",
                 "local",
                 "bailian",
+                "bailian",
                 "configured",
             ]
             assert [x["id"] for x in labels if x["kind"] != "bailian"] == [
@@ -432,6 +433,67 @@ def test_bailian_uses_selected_deployment_persona_and_history(
                 missing.status_code == 400 and "百炼试聊 API Key" in missing["message"]
             )
             assert len(calls) == 1
+
+    asyncio.run(run())
+
+
+def test_group_chat_v2_uses_its_evaluated_settings_and_only_returns_the_answer(
+    entry, monkeypatch
+):
+    requests = []
+
+    @asynccontextmanager
+    async def post(client, url, **kwargs):
+        requests.append(kwargs["json"])
+        message = {"content": "  星河  ", "reasoning_content": "模型的内部推理"}
+        body = {"output": {"choices": [{"message": message}]}}
+        yield SimpleNamespace(status=200, json=AsyncMock(return_value=body))
+
+    monkeypatch.setattr(aiohttp.ClientSession, "post", post)
+    monkeypatch.setenv("DASHSCOPE_API_KEY", "test-workspace-key")
+
+    async def run():
+        async with entry.running() as env:
+            plugin = env.plugin
+            state = await plugin.page_state()
+            model = "bailian:llm-qd5s21mahp3999y0:qwen3-8b-d39bed90dfab"
+            cloud = next(
+                row for row in state["simulation_models"] if row["id"] == model
+            )
+            assert "群聊微调 Qwen3-8B v2" in cloud["label"]
+            history = [
+                {"role": "user", "content": "代号叫星河"},
+                {"role": "assistant", "content": "记住了"},
+            ]
+            env.request.payload = dict(
+                action="send", model=model, message="代号是什么？", history=history
+            )
+            job = await plugin.page_simulation()
+            await plugin.simulation.task
+            env.request.payload = {"action": "poll", "id": job["id"]}
+            result = await plugin.page_simulation()
+            assert (result["status"], result["answer"]) == ("done", "星河")
+            persona = await env.context.persona_manager.get_persona(result["persona"])
+            assert requests == [
+                {
+                    "model": "qwen3-8b-d39bed90dfab",
+                    "input": {
+                        "messages": [
+                            {"role": "system", "content": persona.system_prompt},
+                            *history,
+                            {"role": "user", "content": "代号是什么？"},
+                        ]
+                    },
+                    "parameters": {
+                        "result_format": "message",
+                        "enable_thinking": True,
+                        "max_tokens": 1536,
+                        "temperature": 0.6,
+                        "top_p": 0.95,
+                        "top_k": 20,
+                    },
+                }
+            ]
 
     asyncio.run(run())
 

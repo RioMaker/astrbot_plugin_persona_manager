@@ -11,6 +11,8 @@ TEXT_LIMITS = {"evolution_guidance": 4000, "thinking_notice_text": 1000}
 BAILIAN_WORKSPACE_ID = re.compile(r"[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?")
 BAILIAN_MODEL_CODE = re.compile(r"[A-Za-z0-9][A-Za-z0-9._:/-]{0,199}")
 BAILIAN_KEY_FORMAT = re.compile(r"[!-~]+")
+BAILIAN_LIUYAO_MODEL = "qwen3-4b-instruct-2507-438f534673d5-v1"
+BAILIAN_GROUP_CHAT_MODEL = "qwen3-8b-d39bed90dfab"
 
 
 INT_LIMITS = {
@@ -95,7 +97,7 @@ class Settings:
     local_chat_groups: frozenset[str] = field(default_factory=frozenset)
     bailian_workspace_id: str = "llm-qd5s21mahp3999y0"
     bailian_model_codes: frozenset[str] = frozenset(
-        {"qwen3-4b-instruct-2507-438f534673d5-v1"}
+        {BAILIAN_LIUYAO_MODEL, BAILIAN_GROUP_CHAT_MODEL}
     )
     learning_enabled: bool = True
     learning_provider_id: str = ""

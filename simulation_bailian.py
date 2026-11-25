@@ -5,9 +5,21 @@ import os
 
 import aiohttp
 
-from .settings import BAILIAN_KEY_FORMAT, configured_bailian_key
+from .settings import (
+    BAILIAN_GROUP_CHAT_MODEL,
+    BAILIAN_KEY_FORMAT,
+    Settings,
+    configured_bailian_key,
+)
 
 MISSING_KEY = "请在「设置与方向 → 模型与预算」填写并保存「百炼试聊 API Key」。"
+
+
+def is_group_chat_v2(workspace, model_code):
+    return (
+        workspace == Settings.bailian_workspace_id
+        and model_code == BAILIAN_GROUP_CHAT_MODEL
+    )
 
 
 def api_key(config):
@@ -30,14 +42,20 @@ async def generate(workspace, model_code, system, messages, max_tokens, key):
         f"https://{workspace}.cn-beijing.maas.aliyuncs.com"
         "/api/v1/services/aigc/text-generation/generation"
     )
+    parameters = {
+        "result_format": "message",
+        "max_tokens": max_tokens,
+        "enable_thinking": False,
+    }
+    if is_group_chat_v2(workspace, model_code):
+        # The reasoning budget and sampling match this deployment's evaluated chat profile.
+        parameters.update(
+            enable_thinking=True, max_tokens=1536, temperature=0.6, top_p=0.95, top_k=20
+        )
     body = {
         "model": model_code,
         "input": {"messages": [{"role": "system", "content": system}, *messages]},
-        "parameters": {
-            "result_format": "message",
-            "max_tokens": max_tokens,
-            "enable_thinking": False,
-        },
+        "parameters": parameters,
     }
     timeout = aiohttp.ClientTimeout(total=120, sock_connect=15)
     try:

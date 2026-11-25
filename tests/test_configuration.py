@@ -116,6 +116,70 @@ def test_bailian_model_settings_accept_new_deployments_and_explicit_empty_lists(
     ).bailian_workspace_id
 
 
+@pytest.mark.parametrize(
+    ("workspace", "models", "upgrade"),
+    [
+        (
+            Settings.bailian_workspace_id,
+            ["qwen3-4b-instruct-2507-438f534673d5-v1"],
+            True,
+        ),
+        (Settings.bailian_workspace_id, [], False),
+        (Settings.bailian_workspace_id, ["custom-model"], False),
+        ("ws-other", ["qwen3-4b-instruct-2507-438f534673d5-v1"], False),
+    ],
+)
+def test_bailian_preset_upgrade_respects_saved_choices(
+    entry, tmp_path, workspace, models, upgrade
+):
+    async def run():
+        path = tmp_path / "native.json"
+        cfg = SavedConfig(
+            path,
+            bailian_workspace_id=workspace,
+            bailian_model_codes=models,
+            bailian_api_key="existing-test-key",
+        )
+        async with entry.running(config=cfg) as env:
+            if not upgrade:
+                assert cfg["bailian_model_codes"] == models and not path.exists()
+                return
+            saved = json.loads(path.read_text(encoding="utf-8"))
+            assert saved["bailian_model_codes"] == [*models, "qwen3-8b-d39bed90dfab"]
+            assert saved["bailian_api_key"] == "existing-test-key"
+            env.request.payload = {
+                "action": "config_save",
+                "revision": revision(cfg),
+                "values": {"bailian_model_codes": models},
+            }
+            assert (await env.plugin.page_action())["saved"]
+        async with entry.running(config=cfg):
+            assert (
+                json.loads(path.read_text(encoding="utf-8"))["bailian_model_codes"]
+                == models
+            )
+            assert cfg["bailian_model_codes"] == models
+
+    asyncio.run(run())
+
+
+def test_failed_bailian_preset_upgrade_retries_on_reload(entry, tmp_path):
+    async def run():
+        legacy = ["qwen3-4b-instruct-2507-438f534673d5-v1"]
+        cfg = SavedConfig(
+            tmp_path / "native.json", fail=True, bailian_model_codes=legacy
+        )
+        async with entry.running(config=cfg):
+            assert cfg["bailian_model_codes"] == legacy and not cfg.path.exists()
+        cfg.fail = False
+        async with entry.running(config=cfg):
+            assert json.loads(cfg.path.read_text(encoding="utf-8"))[
+                "bailian_model_codes"
+            ] == [*legacy, "qwen3-8b-d39bed90dfab"]
+
+    asyncio.run(run())
+
+
 def test_saving_bailian_deployments_updates_simulator_without_interrupting_learning(
     entry, tmp_path
 ):

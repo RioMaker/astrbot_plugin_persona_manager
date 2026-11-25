@@ -317,7 +317,7 @@ test("Bailian selections isolate deployments and explain missing server credenti
   await flush();
   const el = id => ui.elements.get(id);
   const first = {id: "bailian:ws-test:four-b", label: "阿里云百炼 · four-b", kind: "bailian"};
-  const second = {...first, id: "bailian:ws-test:tuned-v2", label: "阿里云百炼 · tuned-v2"};
+  const second = {...first, id: "bailian:llm-qd5s21mahp3999y0:qwen3-8b-d39bed90dfab", label: "阿里云百炼 · 群聊微调 Qwen3-8B v2"};
   ui.view.simulation_models.push(first, second);
   await el("refresh").handlers.click();
   const select = async model => {
@@ -876,7 +876,7 @@ test("overview separates captured dialogue, pending extraction and stored memory
   ui.view.schedule = { state: "budget", reason: "预计 20009 tokens，单次上限 20000 tokens", groups: [] };
   await vm.runInContext("loadState()", ui.sandbox);
   const detail = textOf(ui.elements.get("schedule-details"));
-  assert.match(detail, /运行版本：v2\.2\.1 \/ 页面 v2\.9\.0/);
+  assert.match(detail, /运行版本：v2\.2\.1 \/ 页面 v2\.9\.1/);
   assert.match(detail, /已采集原文：24/);
   assert.match(detail, /待整理对话：20/);
   assert.match(detail, /生效记忆：0/);
@@ -915,7 +915,7 @@ test("empty learning calls explain zero capture, paused and disabled learning wi
 test("legacy overview diagnostics remain unknown and translate active scheduler states", async () => {
   const ui = page(); await flush();
   const detail = textOf(ui.elements.get("schedule-details"));
-  assert.match(detail, /运行版本：未知 \/ 页面 v2\.9\.0/);
+  assert.match(detail, /运行版本：未知 \/ 页面 v2\.9\.1/);
   assert.match(detail, /已采集原文：—/);
   assert.match(detail, /待整理对话：—/);
   assert.match(detail, /待确认记忆：—/);

@@ -33,13 +33,13 @@ from .groups import GroupDiscovery
 from .ingress import group_identity, is_text_chat, own_text, sample
 from .memory_tools import MemoryTools
 from .runtime import CONTEXT_MARKER, Runtime
-from .settings import Settings
+from .settings import BAILIAN_LIUYAO_MODEL, Settings
 from .simulation import SEED_SOURCE, Simulation, SimulationBusy, chat_messages
 from .storage import Store
 from .temporal import BEIJING
 
 PLUGIN_NAME = "astrbot_plugin_persona_manager"
-PLUGIN_VERSION = "2.9.0"
+PLUGIN_VERSION = "2.9.1"
 GATE_NAME = "astrbot_plugin_access_gate"
 PENDING_KEY = PLUGIN_NAME + ":interaction"
 SENT_KEY = PLUGIN_NAME + ":sent"
@@ -250,7 +250,25 @@ class PersonaManagerPlugin(Star):
             )
 
     async def initialize(self):
+        try:
+            await self._upgrade_bailian_presets()
+        except Exception:
+            logger.warning("[可可子人格] 百炼试聊预置升级失败，下次加载插件时重试。")
         self.runtime.start()
+
+    async def _upgrade_bailian_presets(self):
+        marker = "bailian_group_chat_v2_preset"
+        if await self.runtime.db("get_meta", marker):
+            return
+        # AstrBot persists schema defaults, so existing 4B-only installs need one update.
+        if (
+            self.settings().bailian_workspace_id == Settings.bailian_workspace_id
+            and self.config.get("bailian_model_codes") == [BAILIAN_LIUYAO_MODEL]
+        ):
+            updated = {"bailian_model_codes": sorted(Settings.bailian_model_codes)}
+            if not await self._persist_config(updated):
+                return
+        await self.runtime.db("set_meta", marker, True)
 
     @filter.event_message_type(filter.EventMessageType.ALL, priority=10002)
     async def discover_groups(self, event: AstrMessageEvent):
@@ -821,27 +839,34 @@ class PersonaManagerPlugin(Star):
         # Persona/provider lookups may yield to a second Dashboard editor.
         if payload.get("revision") != revision(self.config):
             return error_response("配置已变化，请重新载入并核对草稿", status_code=409)
+        invalidate = bool(changed.keys() - BAILIAN_FIELDS)
+        if not invalidate:
+            updated = {**self.config, **{key: updated[key] for key in changed}}
+        if not await self._persist_config(
+            updated, invalidate=invalidate, expected_revision=payload["revision"]
+        ):
+            return error_response("保存被较新的配置覆盖，请刷新核对", status_code=409)
+        self._debug.clear()
+        return json_response({"saved": True, "revision": revision(self.config)})
+
+    async def _persist_config(
+        self, updated, *, invalidate=False, expected_revision=None
+    ):
         old = copy.deepcopy(dict(self.config))
         async_save = getattr(self.config, "save_config_async", None)
         sync_save = getattr(self.config, "save_config", None)
         if not callable(async_save) and not callable(sync_save):
             raise ValueError("当前 AstrBot 配置保存接口不可用")
         # Simulator deployments do not participate in background extraction.
-        if changed.keys() - BAILIAN_FIELDS:
+        if invalidate:
             await self.runtime.db("invalidate")
-        else:
-            updated = {**old, **{key: updated[key] for key in changed}}
-        if payload.get("revision") != revision(self.config):
-            return error_response("配置已变化，请重新载入并核对草稿", status_code=409)
+        if expected_revision is not None and expected_revision != revision(self.config):
+            return False
         try:
             if callable(async_save):
-                saved = await async_save(updated)
-                if saved is False:
-                    return error_response(
-                        "保存被较新的配置覆盖，请刷新核对", status_code=409
-                    )
-            else:
-                await asyncio.to_thread(sync_save, updated)
+                return await async_save(updated) is not False
+            await asyncio.to_thread(sync_save, updated)
+            return True
         except Exception:
             # AstrBot merges the mapping before disk IO. Restore failed writes in memory.
             for key, value in updated.items():
@@ -851,8 +876,6 @@ class PersonaManagerPlugin(Star):
                     else:
                         self.config.pop(key, None)
             raise
-        self._debug.clear()
-        return json_response({"saved": True, "revision": revision(self.config)})
 
     async def page_state(self):
         if not request.username:
