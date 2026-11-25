@@ -33,7 +33,7 @@ from .storage import Store
 from .temporal import BEIJING
 
 PLUGIN_NAME = "astrbot_plugin_persona_manager"
-PLUGIN_VERSION = "2.7.0"
+PLUGIN_VERSION = "2.8.0"
 GATE_NAME = "astrbot_plugin_access_gate"
 PENDING_KEY = PLUGIN_NAME + ":interaction"
 SENT_KEY = PLUGIN_NAME + ":sent"
@@ -820,8 +820,9 @@ class PersonaManagerPlugin(Star):
         sync_save = getattr(self.config, "save_config", None)
         if not callable(async_save) and not callable(sync_save):
             raise ValueError("当前 AstrBot 配置保存接口不可用")
-        # Invalidate in-flight extraction even if the direction later changes back.
-        await self.runtime.db("invalidate")
+        # Simulator deployments do not participate in background extraction.
+        if changed.keys() - {"bailian_workspace_id", "bailian_model_codes"}:
+            await self.runtime.db("invalidate")
         if payload.get("revision") != revision(self.config):
             return error_response("配置已变化，请重新载入并核对草稿", status_code=409)
         try:
@@ -884,9 +885,7 @@ class PersonaManagerPlugin(Star):
             return json_response(
                 {
                     "config": page_config(self.config),
-                    "simulation_models": self.simulation.models(
-                        self.settings().local_chat_provider_id
-                    ),
+                    "simulation_models": self.simulation.models(self.settings()),
                     "simulation_loaded_model": self.simulation.loaded_model,
                     "groups": await self.runtime.db("known_groups"),
                     "choices": await self._page_choices(),
@@ -983,7 +982,7 @@ class PersonaManagerPlugin(Star):
                     owner,
                     action,
                     payload.get("model"),
-                    self.settings().local_chat_provider_id,
+                    self.settings(),
                 )
                 return json_response(self.simulation.state(owner))
             if action in ("poll", "cancel"):
@@ -1020,7 +1019,7 @@ class PersonaManagerPlugin(Star):
                     persona_id,
                     core,
                     source,
-                    self.settings().local_chat_provider_id,
+                    self.settings(),
                 )
             )
         except SimulationBusy as exc:

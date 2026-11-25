@@ -263,7 +263,7 @@ function renderCoreDirty() {
 const settingsLayout = [
   { id: "rhythm", title: "整理节奏", caption: "什么时候开始思考", description: "按群积累已回复的对话，达到门槛后批量整理；可修改发到群里的思考提示，整理仍受时段、间隔与预算约束。", fields: ["enabled", "learning_enabled", "persona_id", "memory_enabled", "memory_batch_threshold", "batch_size", "thinking_notice", "thinking_notice_text"] },
   { id: "lifecycle", title: "记忆生命周期", caption: "七类记忆如何留存", description: "短期按时间、入梦或容量清理；长期保留来源、证据与审核状态。", fields: ["short_cache_capacity", "auto_dream", "dream_hour", "knowledge_confirmations", "event_salience_threshold"] },
-  { id: "budget", title: "模型与预算", caption: "模型选择与用量上限", description: "群聊和后台整理可分别选择模型。记忆整理按输入与输出合计记账，1 Mtokens = 100 万 tokens。", fields: ["local_chat_provider_id", "learning_provider_id", "memory_daily_mtokens", "memory_monthly_mtokens", "model_timeout_seconds", "max_output_tokens", "daily_calls", "daily_group_calls", "daily_token_limit", "daily_group_token_limit"] },
+  { id: "budget", title: "模型与预算", caption: "模型选择与用量上限", description: "在此选择群聊、后台整理和百炼试聊模型。记忆整理按输入与输出合计记账，1 Mtokens = 100 万 tokens。", fields: ["local_chat_provider_id", "learning_provider_id", "bailian_workspace_id", "bailian_model_codes", "memory_daily_mtokens", "memory_monthly_mtokens", "model_timeout_seconds", "max_output_tokens", "daily_calls", "daily_group_calls", "daily_token_limit", "daily_group_token_limit"] },
   { id: "groups", title: "群与共享", caption: "各群模型、记忆与表达", description: "为门禁放行的群选择聊天模型，设置记忆与表达权限。每个群可单独开启公共记忆读取。", fields: ["local_chat_groups", "memory_default_enabled", "observation_groups", "memory_groups", "memory_disabled_groups", "public_memory_groups", "global_style_groups", "group_tags", "ignored_qq"] },
   { id: "expression", title: "表达与方向", caption: "怎么回忆、怎样表达", description: "调整聊天时的记忆与表达用量，设置成长方向；固定核心人设仍单独管理。", fields: ["evolution_guidance", "expression_per_turn", "expression_cooldown_seconds", "memory_context_chars", "expression_context_chars"] },
   { id: "advanced", title: "高级选项", caption: "学习时段与原文保留", description: "旁听积累、学习时段、原文长度与保留时间。互动记忆的数量门槛在“整理节奏”中设置。", fields: ["price_aware_learning", "learning_windows", "cheap_learning_windows", "min_observation_batch", "cheap_observation_batch", "learning_interval_seconds", "cheap_learning_interval_seconds", "max_learning_wait_seconds", "max_source_chars", "max_batch_chars", "max_context_chars", "observation_retention_hours", "interaction_retention_days", "regular_interaction_batch", "cheap_interaction_batch"] },
@@ -827,7 +827,7 @@ function renderOverview() {
   details.replaceChildren();
   const status = object(state.status);
   const capture = object(status.capture);
-  addMeta(details, "运行版本", `${status.runtime_version ? `v${status.runtime_version}` : "未知"} / 页面 v2.7.0`);
+  addMeta(details, "运行版本", `${status.runtime_version ? `v${status.runtime_version}` : "未知"} / 页面 v2.8.0`);
   addMeta(details, "已采集原文", countText(status.sources));
   addMeta(details, "待整理对话", countText(status.pending_interactions));
   addMeta(details, "生效记忆", countText(status.memories));
@@ -1246,6 +1246,10 @@ function simThread(model = byId("sim-model").value, persona = selectedPersona) {
   return JSON.stringify([persona, model, model === "configured" ? state?.config?.values?.local_chat_provider_id : ""]);
 }
 
+function simModel(id = byId("sim-model").value) {
+  return array(state?.simulation_models).find(model => model.id === id);
+}
+
 function simTiming(timing, running = false) {
   if (!timing) return "";
   const parts = [];
@@ -1266,7 +1270,8 @@ function simTiming(timing, running = false) {
 function simControls() {
   const blocked = busy || !ready || simWaiting || simOtherBusy || Boolean(simJob);
   const model = byId("sim-model").value;
-  const local = Boolean(model) && model !== "configured";
+  const choice = simModel(model);
+  const local = choice?.kind === "local";
   byId("sim-model").disabled = blocked;
   const engineButton = byId("sim-engine");
   engineButton.hidden = !local;
@@ -1274,7 +1279,7 @@ function simControls() {
   engineButton.textContent = simLoaded ? "释放模型" : "加载模型";
   engineButton.title = simLoaded ? `释放 ${simLoaded}` : `加载 ${model}`;
   byId("sim-input").disabled = blocked || !model;
-  byId("sim-send").disabled = byId("sim-input").disabled || !byId("sim-input").value.trim();
+  byId("sim-send").disabled = byId("sim-input").disabled || Boolean(choice?.unavailable_reason) || !byId("sim-input").value.trim();
   byId("sim-clear").disabled = blocked || !simChats.get(simThread())?.length;
   byId("sim-stop").hidden = !simJob?.id || simJob.operation === "unload";
   byId("sim-stop").disabled = byId("sim-stop").hidden || simWaiting;
@@ -1282,11 +1287,14 @@ function simControls() {
 
 function renderSim() {
   if (byId("panel-simulation").hidden) return;
-  const model = byId("sim-model").value;
+  const choice = simModel();
   const key = simThread();
-  byId("sim-model-note").textContent = model === "configured"
-    ? "自定义模型由提供商管理，整段回复返回后显示总耗时。"
-    : "首次加载会下载权重，切换时先释放已驻留的模型。首字和总耗时均从服务端接到本轮任务开始计算。";
+  const notes = {
+    bailian: "当前人格和最近六轮试聊将发送到阿里云百炼，按 Token 计费。整段回复返回后显示总耗时。",
+    configured: "自定义模型由提供商管理，整段回复返回后显示总耗时。",
+    local: "首次加载会下载权重，切换时先释放已驻留的模型。首字和总耗时均从服务端接到本轮任务开始计算。",
+  };
+  byId("sim-model-note").textContent = [choice?.unavailable_reason, notes[choice?.kind]].filter(Boolean).join(" ");
   const list = byId("sim-messages");
   const atEnd = list.scrollHeight - list.scrollTop - list.clientHeight < 48;
   list.replaceChildren();
@@ -1310,7 +1318,9 @@ function renderSimStatus() {
   const residency = (simLoaded ? `当前驻留模型：${simLoaded}` : "当前没有已加载的本地模型")
     + (simOtherBusy ? " · 另一个页面正在使用模拟引擎" : "");
   const detail = simJob?.detail || simNotice;
-  if (byId("sim-resident").textContent !== residency) byId("sim-resident").textContent = residency;
+  const resident = byId("sim-resident");
+  resident.hidden = simModel()?.kind === "bailian" && !simLoaded && !simOtherBusy;
+  if (resident.textContent !== residency) resident.textContent = residency;
   if (byId("sim-status").textContent !== detail) byId("sim-status").textContent = detail;
   const timing = byId("sim-timing");
   const elapsed = simTiming(simJob?.timing, true);
@@ -1335,7 +1345,7 @@ function acceptSim(job) {
       const turns = simChats.get(simKey) || [];
       turns.push({role: "user", content: job.question}, {role: "assistant", content: job.answer.trim(), timing: job.timing});
       simChats.set(simKey, turns.slice(-60));
-      simNotice = `已使用${job.prompt_source}，本轮由 ${job.model === "configured" ? "自定义模型" : job.model} 回复。`;
+      simNotice = `已使用${job.prompt_source}，本轮由 ${simModel(job.model)?.label || job.model} 回复。`;
     } else {
       if (isChat && simKey === simThread()) byId("sim-input").value = job.question;
       simNotice = [job.detail || "操作结束", simTiming(job.timing)].filter(Boolean).join(" · ");
@@ -1413,7 +1423,7 @@ byId("sim-form").addEventListener("submit", async (event) => {
   event.preventDefault();
   const input = byId("sim-input");
   const message = input.value.trim(), model = byId("sim-model").value;
-  if (!ready || busy || simJob || simWaiting || simOtherBusy || !message || !model) return;
+  if (!ready || busy || simJob || simWaiting || simOtherBusy || !message || !model || simModel(model)?.unavailable_reason) return;
   ++simEpoch;
   simKey = simThread();
   const history = (simChats.get(simKey) || []).slice(-12).map(({role, content}) => ({role, content}));

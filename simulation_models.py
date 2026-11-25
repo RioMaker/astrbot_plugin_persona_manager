@@ -178,7 +178,7 @@ class ModelFiles:
             "x86_64",
         }:
             raise ValueError(
-                "内置模型适用于 Linux x86_64。其他系统可在「模型与预算」配置自定义模型后试聊。"
+                "内置模型适用于 Linux x86_64。当前系统可在「模拟模型」选择阿里云百炼或已配置的自定义模型。"
             )
         self.directory.mkdir(parents=True, exist_ok=True)
         import fcntl

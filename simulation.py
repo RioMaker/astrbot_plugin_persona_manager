@@ -1,4 +1,4 @@
-"""Authenticated Dashboard chats sharing one resident local inference process."""
+"""Authenticated Dashboard chats with local and remote text models."""
 
 import asyncio
 import json
@@ -13,6 +13,7 @@ from pathlib import Path
 
 import aiohttp
 
+from . import simulation_bailian
 from .simulation_models import MODELS, ModelFiles
 
 MAX_ROUNDS = 6
@@ -142,13 +143,38 @@ class Simulation:
             "loaded_model": self.loaded_model,
         }
 
-    def models(self, provider):
+    @staticmethod
+    def models(settings):
         choices = [
-            {"id": name, "label": f"{name} · 原版 · {asset.size / 1e9:.2f} GB"}
+            {
+                "id": name,
+                "kind": "local",
+                "label": f"{name} · 原版 · {asset.size / 1e9:.2f} GB",
+            }
             for name, asset in MODELS.items()
         ]
+        if settings.bailian_workspace_id:
+            reason = (
+                "" if simulation_bailian.api_key() else simulation_bailian.MISSING_KEY
+            )
+            choices.extend(
+                {
+                    "id": f"bailian:{settings.bailian_workspace_id}:{code}",
+                    "kind": "bailian",
+                    "label": f"阿里云百炼 · {code}",
+                    "unavailable_reason": reason,
+                }
+                for code in sorted(settings.bailian_model_codes)
+            )
+        provider = settings.local_chat_provider_id
         if provider:
-            choices.append({"id": CONFIGURED, "label": f"自定义模型 · {provider}"})
+            choices.append(
+                {
+                    "id": CONFIGURED,
+                    "kind": "configured",
+                    "label": f"自定义模型 · {provider}",
+                }
+            )
         return choices
 
     def find(self, owner, job_id):
@@ -161,29 +187,33 @@ class Simulation:
             raise ValueError("模拟任务已过期或不存在")
         return job
 
-    def _check_available(self, model, provider):
-        if not isinstance(model, str) or (
-            model not in MODELS and not (model == CONFIGURED and provider)
-        ):
+    def _check_available(self, model, settings):
+        choice = next(
+            (item for item in self.models(settings) if item["id"] == model), None
+        )
+        if choice is None:
             raise ValueError("请选择可用的模拟模型")
         if self._closing is not None or self.active is not None:
             raise SimulationBusy("模拟引擎正在处理另一个请求，请稍后重试")
+        return choice
 
-    def start(self, owner, model, messages, persona, system, source, provider):
-        self._check_available(model, provider)
+    def start(self, owner, model, messages, persona, system, source, settings):
+        choice = self._check_available(model, settings)
+        if reason := choice.get("unavailable_reason"):
+            raise ValueError(reason)
         job = Job(owner, model, messages[-1]["content"], persona, source)
-        self._submit(job, messages, system, provider)
+        self._submit(job, messages, system, settings.local_chat_provider_id)
         return job.view(self.loaded_model)
 
-    def manage(self, owner, action, model, provider):
-        self._check_available(model, provider)
+    def manage(self, owner, action, model, settings):
+        self._check_available(model, settings)
         loaded = self.loaded_model
         if action == "select":
             if not loaded or loaded == model:
                 return
-            action = "unload" if model == CONFIGURED else "load"
-        elif model == CONFIGURED:
-            raise ValueError("自定义模型的加载和释放由其提供商管理")
+            action = "load" if model in MODELS else "unload"
+        elif model not in MODELS:
+            raise ValueError("此模型的加载和释放由提供商管理")
         elif action == "unload" and loaded and loaded != model:
             raise SimulationBusy("驻留模型已变更，请核对当前模型后再释放")
 
@@ -249,6 +279,13 @@ class Simulation:
             if job.operation == "unload":
                 await self._release(job)
                 job.detail = "本地模型已释放"
+            elif job.model.startswith("bailian:"):
+                await self._release(job)
+                job.progress("正在等待阿里云百炼回复")
+                _, workspace, model_code = job.model.split(":", 2)
+                job.answer = await simulation_bailian.generate(
+                    workspace, model_code, system, messages, MAX_OUTPUT
+                )
             elif job.model == CONFIGURED:
                 await self._release(job)
                 job.progress("自定义模型正在回复")

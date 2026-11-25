@@ -8,7 +8,13 @@ from dataclasses import asdict
 from pathlib import Path
 
 from .scheduling import parse_window
-from .settings import INT_LIMITS, TEXT_LIMITS, Settings
+from .settings import (
+    BAILIAN_MODEL_CODE,
+    BAILIAN_WORKSPACE_ID,
+    INT_LIMITS,
+    TEXT_LIMITS,
+    Settings,
+)
 from .style_matching import parse_tag_entry
 
 SCHEMA = json.loads(
@@ -49,6 +55,8 @@ SECTIONS = {
         "learning_enabled",
         "learning_provider_id",
         "local_chat_provider_id",
+        "bailian_workspace_id",
+        "bailian_model_codes",
         "batch_size",
         "model_timeout_seconds",
     },
@@ -147,7 +155,10 @@ def validate_changes(current, changes) -> dict:
             ):
                 raise ValueError(f"{label}须为文本列表，最多500项")
             value = sorted(set(item.strip() for item in value if item.strip()))
-            if key == "group_tags":
+            if key == "bailian_model_codes":
+                if any(not BAILIAN_MODEL_CODE.fullmatch(code) for code in value):
+                    raise ValueError("请逐行填写有效的百炼模型调用 ID（ModelCode）")
+            elif key == "group_tags":
                 parsed = [parse_tag_entry(item) for item in value]
                 if len({key for key, _ in parsed}) != len(parsed):
                     raise ValueError("同一群的标签不能重复配置")
@@ -172,6 +183,10 @@ def validate_changes(current, changes) -> dict:
             value = value.strip()
             if key == "persona_id" and not value:
                 raise ValueError("目标人格不能为空")
+            if key == "bailian_workspace_id" and not BAILIAN_WORKSPACE_ID.fullmatch(
+                value
+            ):
+                raise ValueError("请填写百炼北京业务空间 ID，例如 llm-xxx 或 ws-xxx")
         result[key] = value
     thresholds = []
     if result["observation_groups"]:

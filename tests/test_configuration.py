@@ -42,7 +42,7 @@ class SavedConfig(dict):
 def test_every_native_setting_has_a_dashboard_control():
     result = page_config({})
     assert set(result["values"]) == set(result["schema"]) == set(SCHEMA)
-    assert len(SCHEMA) == 52
+    assert len(SCHEMA) == 54
     assert all(field["section"] for field in result["schema"].values())
     assert "api_key" not in result["values"]
     assert result["schema"]["daily_token_limit"]["minimum"] == 0
@@ -71,6 +71,8 @@ def test_every_native_setting_has_a_dashboard_control():
         {"persona_id": ""},
         {"observation_groups": ["任意群"]},
         {"ignored_qq": ["qq:12345"]},
+        {"bailian_workspace_id": "https://other.example"},
+        {"bailian_model_codes": ["two IDs"]},
         {"learning_windows": ["23:00-99:00"]},
         {"cheap_learning_windows": ["12:00-12:00"]},
         {"learning_windows": "23:00-07:00"},
@@ -94,6 +96,50 @@ def test_cross_midnight_windows_and_partial_edits_preserve_other_values():
     assert result["cheap_learning_windows"] == ["23:00-07:00"]
     assert result["daily_calls"] == 8
     assert result["evolution_guidance"] == "简短自然，记住练习进展"
+
+
+def test_bailian_model_settings_accept_new_deployments_and_explicit_empty_lists():
+    defaults = page_config({})["values"]
+    for name in ("bailian_workspace_id", "bailian_model_codes"):
+        assert defaults[name] == SCHEMA[name]["default"]
+    edited = validate_changes(
+        {}, {"bailian_model_codes": [" tuned-v2 ", "tuned-v1", "tuned-v2"]}
+    )
+    assert Settings.read(edited).bailian_model_codes == {"tuned-v1", "tuned-v2"}
+    assert not Settings.read({"bailian_model_codes": []}).bailian_model_codes
+    assert not Settings.read(
+        {"bailian_workspace_id": "ws.example/path"}
+    ).bailian_workspace_id
+
+
+def test_saving_bailian_deployments_updates_simulator_without_interrupting_learning(
+    entry, tmp_path
+):
+    async def run():
+        config = SavedConfig(
+            tmp_path / "native.json", local_chat_provider_id="existing-model"
+        )
+        async with entry.running(config=config) as env:
+            epoch = env.plugin.store.epoch()
+            env.request.payload = {
+                "action": "config_save",
+                "revision": revision(config),
+                "values": {
+                    "bailian_workspace_id": "ws-other",
+                    "bailian_model_codes": ["next-model"],
+                },
+            }
+            assert (await env.plugin.page_action())["saved"]
+            persisted = json.loads(config.path.read_text(encoding="utf-8"))
+            assert persisted["bailian_model_codes"] == ["next-model"]
+            assert persisted["local_chat_provider_id"] == "existing-model"
+            state = await env.plugin.page_state()
+            assert [
+                m["id"] for m in state["simulation_models"] if m["kind"] == "bailian"
+            ] == ["bailian:ws-other:next-model"]
+            assert env.plugin.store.epoch() == epoch
+
+    asyncio.run(run())
 
 
 def test_page_save_persists_and_invalidates_inflight_work_without_touching_core(
@@ -260,7 +306,7 @@ def test_state_exposes_settings_and_safe_selector_labels_only(entry):
             ]
             result = await route(env.context, "state")()
             assert result.status_code == 200
-            assert len(result["config"]["schema"]) == 52
+            assert len(result["config"]["schema"]) == 54
             assert result["choices"]["providers"] == [
                 {"id": "existing-model", "label": "existing-model"}
             ]

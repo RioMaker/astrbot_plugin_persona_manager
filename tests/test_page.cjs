@@ -28,7 +28,7 @@ function page(options = {}) {
     profile: {}, memories: [], scopes: [], styles: [], style_versions: [],
     config: { values: Object.fromEntries(Object.entries(schema).map(([key, field]) => [key, field.default])), schema, revision: "r1" },
     choices: { personas: [{ id: "可可子", label: "可可子" }], providers: [{ id: "cheap-model", label: "学习模型" }] },
-    simulation_models: [{id:"Qwen3.5-2B", label:"2B"}, {id:"Qwen3-8B", label:"8B"}],
+    simulation_models: [{id:"Qwen3.5-2B", label:"2B", kind:"local"}, {id:"Qwen3-8B", label:"8B", kind:"local"}],
     usage: { day: "2026-10-29", summary: {}, daily: [], groups: [], recent: [] },
     schedule: { state: "idle", reason: "等待样本", phase: "regular", groups: [] },
   };
@@ -98,7 +98,7 @@ function simulateModels() {
     if (action === "active" || (action === "select" && !loaded)) {
       return {job: null, loaded_model: loaded, busy: false};
     }
-    const unload = action === "unload" || model === "configured";
+    const unload = action === "unload" || model === "configured" || model.startsWith("bailian:");
     loaded = unload ? null : model;
     const job = {id: String(++sequence), status: "done", model, loaded_model: loaded};
     if (action === "send") {
@@ -247,7 +247,7 @@ test("a configured provider shows only its completed round time across manual re
   await flush();
   const el = id => ui.elements.get(id);
   ui.view.config.values.local_chat_provider_id = "my-model";
-  ui.view.simulation_models.push({id: "configured", label: "自定义模型"});
+  ui.view.simulation_models.push({id: "configured", label: "自定义模型", kind: "configured"});
   await el("refresh").handlers.click();
   el("sim-model").value = "configured";
   await el("sim-model").handlers.change();
@@ -256,6 +256,44 @@ test("a configured provider shows only its completed round time across manual re
   await el("refresh").handlers.click();
   assert.equal(el("sim-messages").children.at(-1).children.at(-1).textContent, "总耗时 1.23 秒");
   assert.equal(ui.timers.size, 0);
+});
+
+test("Bailian selections isolate deployments and explain missing server credentials", async () => {
+  const ui = page({simulation: simulateModels()});
+  await flush();
+  const el = id => ui.elements.get(id);
+  const first = {id: "bailian:ws-test:four-b", label: "阿里云百炼 · four-b", kind: "bailian"};
+  const second = {...first, id: "bailian:ws-test:tuned-v2", label: "阿里云百炼 · tuned-v2"};
+  ui.view.simulation_models.push(first, second);
+  await el("refresh").handlers.click();
+  const select = async model => {
+    el("sim-model").value = model.id;
+    await el("sim-model").handlers.change();
+  };
+  const send = async message => {
+    el("sim-input").value = message;
+    el("sim-input").handlers.input();
+    await el("sim-form").handlers.submit({preventDefault() {}});
+  };
+  await select(first);
+  assert.equal(el("sim-engine").hidden, true);
+  assert.match(el("sim-model-note").textContent, /阿里云百炼/);
+  await send("第一轮");
+  await select(second);
+  assert.doesNotMatch(textOf(el("sim-messages")), /第一轮/);
+  await send("第二个部署");
+  await select(first);
+  await send("继续");
+  const sends = () => ui.posts.filter(p => p.payload.action === "send");
+  assert.deepEqual(sends().map(p => p.payload.history.length), [0, 0, 2]);
+  assert.match(el("sim-status").textContent, /阿里云百炼 · four-b/);
+  first.unavailable_reason = "请设置 DASHSCOPE_API_KEY";
+  await el("refresh").handlers.click();
+  await send("缺少密钥");
+  assert.equal(el("sim-send").disabled, true);
+  assert.match(el("sim-model-note").textContent, /DASHSCOPE_API_KEY/);
+  assert.equal(sends().length, 3);
+  assert.ok(ui.posts.every(p => !["load","unload"].includes(p.payload.action)));
 });
 
 test("an old status response cannot undo a manual load and a foreign job locks the controls", async () => {
@@ -768,7 +806,7 @@ test("overview separates captured dialogue, pending extraction and stored memory
   ui.view.schedule = { state: "budget", reason: "预计 20009 tokens，单次上限 20000 tokens", groups: [] };
   await vm.runInContext("loadState()", ui.sandbox);
   const detail = textOf(ui.elements.get("schedule-details"));
-  assert.match(detail, /运行版本：v2\.2\.1 \/ 页面 v2\.7\.0/);
+  assert.match(detail, /运行版本：v2\.2\.1 \/ 页面 v2\.8\.0/);
   assert.match(detail, /已采集原文：24/);
   assert.match(detail, /待整理对话：20/);
   assert.match(detail, /生效记忆：0/);
@@ -807,7 +845,7 @@ test("empty learning calls explain zero capture, paused and disabled learning wi
 test("legacy overview diagnostics remain unknown and translate active scheduler states", async () => {
   const ui = page(); await flush();
   const detail = textOf(ui.elements.get("schedule-details"));
-  assert.match(detail, /运行版本：未知 \/ 页面 v2\.7\.0/);
+  assert.match(detail, /运行版本：未知 \/ 页面 v2\.8\.0/);
   assert.match(detail, /已采集原文：—/);
   assert.match(detail, /待整理对话：—/);
   assert.match(detail, /待确认记忆：—/);

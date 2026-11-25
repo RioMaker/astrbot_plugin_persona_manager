@@ -1,12 +1,15 @@
 """Bounded, fail-closed settings. Private chat is deliberately not configurable."""
 
 import math
+import re
 from dataclasses import dataclass, field
 from typing import Any, Mapping
 
 from .style_matching import parse_tag_entry
 
 TEXT_LIMITS = {"evolution_guidance": 4000, "thinking_notice_text": 1000}
+BAILIAN_WORKSPACE_ID = re.compile(r"[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?")
+BAILIAN_MODEL_CODE = re.compile(r"[A-Za-z0-9][A-Za-z0-9._:/-]{0,199}")
 
 INT_LIMITS = {
     "memory_batch_threshold": (20, 1, 60),
@@ -83,6 +86,10 @@ class Settings:
     ignored_qq: frozenset[str] = field(default_factory=frozenset)
     local_chat_provider_id: str = ""
     local_chat_groups: frozenset[str] = field(default_factory=frozenset)
+    bailian_workspace_id: str = "llm-qd5s21mahp3999y0"
+    bailian_model_codes: frozenset[str] = frozenset(
+        {"qwen3-4b-instruct-2507-438f534673d5-v1"}
+    )
     learning_enabled: bool = True
     learning_provider_id: str = ""
     batch_size: int = 30
@@ -125,6 +132,23 @@ class Settings:
         values["persona_id"] = str(config.get("persona_id", "可可子") or "").strip()
         for name in ("learning_provider_id", "local_chat_provider_id"):
             values[name] = str(config.get(name, "") or "").strip()
+        workspace = config.get("bailian_workspace_id", cls.bailian_workspace_id)
+        values["bailian_workspace_id"] = (
+            workspace.strip()
+            if isinstance(workspace, str)
+            and BAILIAN_WORKSPACE_ID.fullmatch(workspace.strip())
+            else ""
+        )
+        models = config.get("bailian_model_codes", list(cls.bailian_model_codes))
+        values["bailian_model_codes"] = (
+            frozenset(
+                item.strip()
+                for item in models
+                if isinstance(item, str) and BAILIAN_MODEL_CODE.fullmatch(item.strip())
+            )
+            if isinstance(models, list)
+            else frozenset()
+        )
         for name in (
             "observation_groups",
             "local_chat_groups",

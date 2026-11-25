@@ -1,5 +1,6 @@
 import asyncio
 import hashlib
+import json
 import select
 import subprocess
 import sys
@@ -12,6 +13,7 @@ import aiohttp
 import pytest
 from aiohttp import web
 from astrbot_plugin_persona_manager import simulation
+from astrbot_plugin_persona_manager.settings import Settings
 from astrbot_plugin_persona_manager.simulation_models import Asset, ModelFiles
 from astrbot_plugin_persona_manager.tests.test_integration import entry as entry
 
@@ -105,7 +107,13 @@ def test_timing_tracks_visible_stream_text_and_freezes_at_completion(
     async def run():
         for cold in (True, False):
             start = sim.start(
-                "admin", model, [{"role": "user", "content": "hi"}], "P", "S", "S", None
+                "admin",
+                model,
+                [{"role": "user", "content": "hi"}],
+                "P",
+                "S",
+                "S",
+                Settings(),
             )
             assert start["timing"]["elapsed_ms"] == 0
             await sim.task
@@ -158,8 +166,18 @@ def test_simulation_access_isolation_switching_and_history(
     async def run():
         async with entry.running({"local_chat_provider_id": "my-tuned-model"}) as env:
             plugin = env.plugin
-            labels = plugin.simulation.models("my-tuned-model")
-            assert [x["id"] for x in labels] == ["Qwen3.5-2B", "Qwen3-8B", "configured"]
+            labels = plugin.simulation.models(plugin.settings())
+            assert [x["kind"] for x in labels] == [
+                "local",
+                "local",
+                "bailian",
+                "configured",
+            ]
+            assert [x["id"] for x in labels if x["kind"] != "bailian"] == [
+                "Qwen3.5-2B",
+                "Qwen3-8B",
+                "configured",
+            ]
 
             async def api(**data):
                 env.request.payload = data
@@ -307,6 +325,163 @@ def test_manual_load_release_and_warm_messages(entry, monkeypatch, native_engine
     asyncio.run(run())
 
 
+def test_bailian_uses_selected_deployment_persona_and_history(
+    entry, monkeypatch, native_engines
+):
+    calls = []
+
+    @asynccontextmanager
+    async def post(client, url, **kwargs):
+        calls.append((url, kwargs))
+        body = {"output": {"choices": [{"message": {"content": "  接住上文了  "}}]}}
+        yield SimpleNamespace(status=200, json=AsyncMock(return_value=body))
+
+    monkeypatch.setattr(aiohttp.ClientSession, "post", post)
+    monkeypatch.setenv("DASHSCOPE_API_KEY", "test-only-secret")
+
+    async def run():
+        async with entry.running() as env:
+            plugin = env.plugin
+            sim = plugin.simulation
+            sim.files.prepare = AsyncMock(return_value=("engine", "weights"))
+
+            async def api(action, **data):
+                env.request.payload = dict(action=action, **data)
+                return await plugin.page_simulation()
+
+            state = await plugin.page_state()
+            assert "test-only-secret" not in json.dumps(state)
+            cloud = next(
+                option
+                for option in state["simulation_models"]
+                if option["kind"] == "bailian"
+            )
+            assert (
+                cloud["id"]
+                == "bailian:llm-qd5s21mahp3999y0:qwen3-4b-instruct-2507-438f534673d5-v1"
+            )
+            assert not cloud["unavailable_reason"]
+            await api("load", model="Qwen3.5-2B")
+            await sim.task
+            selecting = await api("select", model=cloud["id"])
+            assert selecting["job"]["operation"] == "unload"
+            await sim.task
+            assert (
+                sim.loaded_model is None and native_engines[0].process.returncode == 0
+            )
+            for action in ("load", "unload"):
+                assert (await api(action, model=cloud["id"])).status_code == 400
+            assert not calls
+
+            # A changed workspace or removed deployment invalidates stale page choices.
+            plugin.config.update(
+                bailian_workspace_id="ws-new", bailian_model_codes=["tuned-v2"]
+            )
+            old = await api("send", model=cloud["id"], message="旧页面")
+            assert old.status_code == 400 and not calls
+            model = "bailian:ws-new:tuned-v2"
+            env.request.username = None
+            assert (await api("send", model=model, message="未登录")).status_code == 403
+            env.request.username = "admin"
+            history = [
+                {"role": "user", "content": "上文"},
+                {"role": "assistant", "content": "收到"},
+            ]
+            started = await api("send", model=model, message="继续", history=history)
+            await sim.task
+            result = await api("poll", id=started["id"])
+            assert result["status"] == "done" and result["answer"] == "接住上文了"
+            assert (
+                result["timing"]["elapsed_ms"] >= 0
+                and result["timing"]["first_text_ms"] is None
+            )
+            persona = await env.context.persona_manager.get_persona(result["persona"])
+            assert len(calls) == 1
+            url, request = calls[0]
+            assert (
+                url
+                == "https://ws-new.cn-beijing.maas.aliyuncs.com/api/v1/services/aigc/text-generation/generation"
+            )
+            assert request["headers"]["Authorization"] == "Bearer test-only-secret"
+            assert request["allow_redirects"] is False
+            assert request["json"] == {
+                "model": "tuned-v2",
+                "input": {
+                    "messages": [
+                        {"role": "system", "content": persona.system_prompt},
+                        *history,
+                        {"role": "user", "content": "继续"},
+                    ]
+                },
+                "parameters": {
+                    "result_format": "message",
+                    "max_tokens": simulation.MAX_OUTPUT,
+                    "enable_thinking": False,
+                },
+            }
+            sim.files.prepare.assert_awaited_once()
+            env.context.llm_generate.assert_not_called()
+            env.context.send_message.assert_not_called()
+            assert plugin.store.pending_sources() == []
+
+            monkeypatch.delenv("DASHSCOPE_API_KEY")
+            missing = await api("send", model=model, message="缺少密钥")
+            assert (
+                missing.status_code == 400 and "DASHSCOPE_API_KEY" in missing["message"]
+            )
+            assert len(calls) == 1
+
+    asyncio.run(run())
+
+
+@pytest.mark.parametrize(
+    ("status", "body", "detail"),
+    [
+        (403, {"message": "private provider diagnostics"}, "出口 IP"),
+        (429, {}, "限流"),
+        (200, {"output": {"choices": []}}, "格式"),
+        (200, {"output": {"choices": [{"message": {"content": ""}}]}}, "正文"),
+    ],
+)
+def test_bailian_failures_remain_visible_without_fallback(
+    entry, monkeypatch, status, body, detail
+):
+    @asynccontextmanager
+    async def post(*args, **kwargs):
+        yield SimpleNamespace(status=status, json=AsyncMock(return_value=body))
+
+    monkeypatch.setattr(aiohttp.ClientSession, "post", post)
+    monkeypatch.setenv("DASHSCOPE_API_KEY", "test-only-secret")
+
+    async def run():
+        async with entry.running() as env:
+            sim = env.plugin.simulation
+            settings = env.plugin.settings()
+            model = next(
+                row["id"] for row in sim.models(settings) if row["kind"] == "bailian"
+            )
+            chat = sim.start(
+                "admin",
+                model,
+                [{"role": "user", "content": "测试"}],
+                "可可子",
+                "人设",
+                "已保存的人格",
+                settings,
+            )
+            await sim.task
+            result = sim.find("admin", chat["id"]).view(sim.loaded_model)
+            assert result["status"] == "error" and detail in result["detail"]
+            assert (
+                "private" not in result["detail"]
+                and "test-only-secret" not in result["detail"]
+            )
+            assert sim.active is None
+            env.context.llm_generate.assert_not_called()
+
+    asyncio.run(run())
+
+
 def test_cancel_reply_keeps_engine_and_cancel_switch_finishes_release(
     entry, monkeypatch, native_engines
 ):
@@ -329,7 +504,13 @@ def test_cancel_reply_keeps_engine_and_cancel_switch_finishes_release(
             monkeypatch.setattr(simulation, "_stream", long_reply)
             msg = [{"role": "user", "content": "长回复"}]
             chat = sim.start(
-                "admin", small, msg, "可可子", "人设", "已保存的人格", None
+                "admin",
+                small,
+                msg,
+                "可可子",
+                "人设",
+                "已保存的人格",
+                env.plugin.settings(),
             )
             await generating.wait()
             await sim.stop()
@@ -343,20 +524,20 @@ def test_cancel_reply_keeps_engine_and_cancel_switch_finishes_release(
                 await allow_release.wait()
 
             native_engines[-1].resources.push_async_callback(wait_for_release)
-            sim.manage("admin", "select", large, None)
+            sim.manage("admin", "select", large, env.plugin.settings())
             await releasing.wait()
             stopping = asyncio.create_task(sim.stop())
             await asyncio.sleep(0)
             with pytest.raises(simulation.SimulationBusy):
-                sim.manage("other", "load", small, None)
+                sim.manage("other", "load", small, env.plugin.settings())
             allow_release.set()
             await stopping
             assert sim.loaded_model is None and len(native_engines) == 1
 
-            sim.manage("admin", "load", small, None)
+            sim.manage("admin", "load", small, env.plugin.settings())
             await sim.task
             sim.files.prepare.side_effect = ValueError("磁盘空间不足")
-            sim.manage("admin", "select", large, None)
+            sim.manage("admin", "select", large, env.plugin.settings())
             failed = sim.active
             await sim.task
             assert failed.status == "error" and "磁盘" in failed.detail
