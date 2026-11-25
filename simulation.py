@@ -120,9 +120,10 @@ class ResidentEngine:
 
 
 class Simulation:
-    def __init__(self, directory, context):
+    def __init__(self, directory, context, config=None):
         self.files = ModelFiles(directory)
         self.context = context
+        self.config = config if config is not None else {}
         self.jobs = {}
         self.active = None
         self.task = None
@@ -143,8 +144,7 @@ class Simulation:
             "loaded_model": self.loaded_model,
         }
 
-    @staticmethod
-    def models(settings):
+    def models(self, settings):
         choices = [
             {
                 "id": name,
@@ -155,7 +155,9 @@ class Simulation:
         ]
         if settings.bailian_workspace_id:
             reason = (
-                "" if simulation_bailian.api_key() else simulation_bailian.MISSING_KEY
+                ""
+                if simulation_bailian.api_key(self.config)
+                else simulation_bailian.MISSING_KEY
             )
             choices.extend(
                 {
@@ -284,7 +286,12 @@ class Simulation:
                 job.progress("正在等待阿里云百炼回复")
                 _, workspace, model_code = job.model.split(":", 2)
                 job.answer = await simulation_bailian.generate(
-                    workspace, model_code, system, messages, MAX_OUTPUT
+                    workspace,
+                    model_code,
+                    system,
+                    messages,
+                    MAX_OUTPUT,
+                    simulation_bailian.api_key(self.config),
                 )
             elif job.model == CONFIGURED:
                 await self._release(job)

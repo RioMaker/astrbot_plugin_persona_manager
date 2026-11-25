@@ -20,7 +20,13 @@ from astrbot.core.star.session_llm_manager import SessionServiceManager
 from astrbot.core.star.session_plugin_manager import SessionPluginManager
 from astrbot.core.utils.astrbot_path import get_astrbot_data_path
 
-from .configuration import page_config, revision, usage_for_page, validate_changes
+from .configuration import (
+    BAILIAN_FIELDS,
+    page_config,
+    revision,
+    usage_for_page,
+    validate_changes,
+)
 from .delivery import confirmed_result_delivery, confirmed_tool_delivery
 from .dream_context import DreamContext
 from .groups import GroupDiscovery
@@ -33,7 +39,7 @@ from .storage import Store
 from .temporal import BEIJING
 
 PLUGIN_NAME = "astrbot_plugin_persona_manager"
-PLUGIN_VERSION = "2.8.0"
+PLUGIN_VERSION = "2.8.1"
 GATE_NAME = "astrbot_plugin_access_gate"
 PENDING_KEY = PLUGIN_NAME + ":interaction"
 SENT_KEY = PLUGIN_NAME + ":sent"
@@ -59,7 +65,7 @@ class PersonaManagerPlugin(Star):
             / "persona.sqlite3"
         )
         self.store = Store(path)
-        self.simulation = Simulation(path.parent / "simulation", context)
+        self.simulation = Simulation(path.parent / "simulation", context, config)
         self.runtime = Runtime(
             self.store,
             context,
@@ -821,8 +827,10 @@ class PersonaManagerPlugin(Star):
         if not callable(async_save) and not callable(sync_save):
             raise ValueError("当前 AstrBot 配置保存接口不可用")
         # Simulator deployments do not participate in background extraction.
-        if changed.keys() - {"bailian_workspace_id", "bailian_model_codes"}:
+        if changed.keys() - BAILIAN_FIELDS:
             await self.runtime.db("invalidate")
+        else:
+            updated = {**old, **{key: updated[key] for key in changed}}
         if payload.get("revision") != revision(self.config):
             return error_response("配置已变化，请重新载入并核对草稿", status_code=409)
         try:

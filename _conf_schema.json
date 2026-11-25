@@ -72,11 +72,18 @@
     "default": [],
     "hint": "可在群列表勾选，也可填写群号或 平台实例ID:群号。空列表表示关闭。"
   },
+  "bailian_api_key": {
+    "type": "string",
+    "description": "百炼试聊 API Key",
+    "default": "",
+    "secret": true,
+    "hint": "只用于模拟对话。填写北京业务空间的百炼密钥。插件密钥留空时，沿用 AstrBot 运行环境已有的 DASHSCOPE_API_KEY。"
+  },
   "bailian_workspace_id": {
     "type": "string",
     "description": "百炼北京业务空间 ID",
     "default": "llm-qd5s21mahp3999y0",
-    "hint": "模拟对话使用这个北京业务空间的专属接口。请在 AstrBot 运行环境设置 DASHSCOPE_API_KEY。"
+    "hint": "模拟对话使用这个北京业务空间的专属接口。"
   },
   "bailian_model_codes": {
     "type": "list",

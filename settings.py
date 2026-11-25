@@ -10,6 +10,8 @@ from .style_matching import parse_tag_entry
 TEXT_LIMITS = {"evolution_guidance": 4000, "thinking_notice_text": 1000}
 BAILIAN_WORKSPACE_ID = re.compile(r"[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?")
 BAILIAN_MODEL_CODE = re.compile(r"[A-Za-z0-9][A-Za-z0-9._:/-]{0,199}")
+BAILIAN_KEY_FORMAT = re.compile(r"[!-~]+")
+
 
 INT_LIMITS = {
     "memory_batch_threshold": (20, 1, 60),
@@ -40,6 +42,11 @@ INT_LIMITS = {
     "cheap_learning_interval_seconds": (300, 60, 86400),
     "max_learning_wait_seconds": (21600, 600, 86400),
 }
+
+
+def configured_bailian_key(config: Mapping[str, Any]) -> str:
+    value = config.get("bailian_api_key")
+    return value.strip() if isinstance(value, str) else ""
 
 
 def integer(value: Any, default: int, low: int, high: int) -> int:

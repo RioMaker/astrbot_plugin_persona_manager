@@ -427,7 +427,7 @@ def test_bailian_uses_selected_deployment_persona_and_history(
             monkeypatch.delenv("DASHSCOPE_API_KEY")
             missing = await api("send", model=model, message="缺少密钥")
             assert (
-                missing.status_code == 400 and "DASHSCOPE_API_KEY" in missing["message"]
+                missing.status_code == 400 and "百炼试聊 API Key" in missing["message"]
             )
             assert len(calls) == 1
 

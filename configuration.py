@@ -9,16 +9,21 @@ from pathlib import Path
 
 from .scheduling import parse_window
 from .settings import (
+    BAILIAN_KEY_FORMAT,
     BAILIAN_MODEL_CODE,
     BAILIAN_WORKSPACE_ID,
     INT_LIMITS,
     TEXT_LIMITS,
     Settings,
+    configured_bailian_key,
 )
 from .style_matching import parse_tag_entry
 
 SCHEMA = json.loads(
     (Path(__file__).parent / "_conf_schema.json").read_text(encoding="utf-8")
+)
+BAILIAN_FIELDS = frozenset(
+    {"bailian_api_key", "bailian_workspace_id", "bailian_model_codes"}
 )
 SECTIONS = {
     "记忆整理与入梦": {
@@ -55,11 +60,10 @@ SECTIONS = {
         "learning_enabled",
         "learning_provider_id",
         "local_chat_provider_id",
-        "bailian_workspace_id",
-        "bailian_model_codes",
         "batch_size",
         "model_timeout_seconds",
-    },
+    }
+    | BAILIAN_FIELDS,
     "Token 预算": {
         "daily_calls",
         "daily_group_calls",
@@ -94,15 +98,22 @@ def values(config) -> dict:
 
 def revision(config) -> str:
     encoded = json.dumps(
-        values(config), ensure_ascii=False, sort_keys=True, separators=(",", ":")
+        {**values(config), "bailian_api_key": configured_bailian_key(config)},
+        ensure_ascii=False,
+        sort_keys=True,
+        separators=(",", ":"),
     )
     return hashlib.sha256(encoded.encode()).hexdigest()
 
 
 def page_config(config) -> dict:
     schema = {}
+    public_values = values(config)
     for key, value in SCHEMA.items():
         field = dict(value)
+        if field.get("secret"):
+            field["configured"] = bool(configured_bailian_key(config))
+            public_values[key] = ""
         field["section"] = next(
             (name for name, keys in SECTIONS.items() if key in keys), "保留与高级"
         )
@@ -117,7 +128,7 @@ def page_config(config) -> dict:
         if key in TEXT_LIMITS:
             field["maxLength"] = TEXT_LIMITS[key]
         schema[key] = field
-    return {"values": values(config), "revision": revision(config), "schema": schema}
+    return {"values": public_values, "revision": revision(config), "schema": schema}
 
 
 def validate_changes(current, changes) -> dict:
@@ -126,6 +137,7 @@ def validate_changes(current, changes) -> dict:
     if set(changes) - set(SCHEMA):
         raise ValueError("包含未知配置项")
     result = values(current)
+    result["bailian_api_key"] = configured_bailian_key(current)
     for key, value in changes.items():
         field = SCHEMA[key]
         label, kind = field.get("description", key), field["type"]
@@ -181,6 +193,12 @@ def validate_changes(current, changes) -> dict:
             if not isinstance(value, str) or len(value) > limit:
                 raise ValueError(f"{label}须为不超过 {limit} 字的文本")
             value = value.strip()
+            if (
+                key == "bailian_api_key"
+                and value
+                and not BAILIAN_KEY_FORMAT.fullmatch(value)
+            ):
+                raise ValueError("百炼试聊 API Key 含有空格或无效字符，请重新填写")
             if key == "persona_id" and not value:
                 raise ValueError("目标人格不能为空")
             if key == "bailian_workspace_id" and not BAILIAN_WORKSPACE_ID.fullmatch(
@@ -188,6 +206,8 @@ def validate_changes(current, changes) -> dict:
             ):
                 raise ValueError("请填写百炼北京业务空间 ID，例如 llm-xxx 或 ws-xxx")
         result[key] = value
+    if changes.keys() <= BAILIAN_FIELDS:
+        return result
     thresholds = []
     if result["observation_groups"]:
         thresholds.append("min_observation_batch")

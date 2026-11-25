@@ -75,7 +75,13 @@ function page(options = {}) {
           if (options.postError) throw options.postError;
           if (options.unconfirmed) return {};
           if (payload.action === "config_save") {
-            Object.assign(view.config.values, payload.values);
+            for (const [name, value] of Object.entries(payload.values)) {
+              if (view.config.schema[name]?.secret) {
+                view.config.schema[name].configured = Boolean(value);
+              } else {
+                view.config.values[name] = value;
+              }
+            }
             view.config.revision = "r2";
             if (payload.values.persona_id) view.persona.id = payload.values.persona_id;
             if (options.refreshAfterSaveError) refreshError = new Error("刷新连接失败");
@@ -656,6 +662,22 @@ test("all server configuration fields render with provider/persona suggestions",
   assert.equal(ui.elements.get("config-save").disabled, true);
 });
 
+test("Bailian key is a write-only password field and other edits preserve it", async () => {
+  const ui = page();
+  await flush();
+  const field = () => ui.elements.get("setting-bailian_api_key");
+  assert.equal(field().type, "password");
+  edit(ui, "bailian_api_key", "plugin-test-key");
+  await ui.elements.get("settings-form").handlers.submit({preventDefault() {}});
+  assert.deepEqual(ui.posts[0].payload.values, {bailian_api_key: "plugin-test-key"});
+  assert.equal(field().value, "");
+  assert.match(field().placeholder, /已配置/);
+  assert.doesNotMatch(JSON.stringify(ui.view), /plugin-test-key/);
+  edit(ui, "daily_calls", "8");
+  await ui.elements.get("settings-form").handlers.submit({preventDefault() {}});
+  assert.deepEqual(ui.posts[1].payload.values, {daily_calls: 8});
+});
+
 test("configuration saves only edited values against the original revision", async () => {
   const ui = page();
   await flush();
@@ -806,7 +828,7 @@ test("overview separates captured dialogue, pending extraction and stored memory
   ui.view.schedule = { state: "budget", reason: "预计 20009 tokens，单次上限 20000 tokens", groups: [] };
   await vm.runInContext("loadState()", ui.sandbox);
   const detail = textOf(ui.elements.get("schedule-details"));
-  assert.match(detail, /运行版本：v2\.2\.1 \/ 页面 v2\.8\.0/);
+  assert.match(detail, /运行版本：v2\.2\.1 \/ 页面 v2\.8\.1/);
   assert.match(detail, /已采集原文：24/);
   assert.match(detail, /待整理对话：20/);
   assert.match(detail, /生效记忆：0/);
@@ -845,7 +867,7 @@ test("empty learning calls explain zero capture, paused and disabled learning wi
 test("legacy overview diagnostics remain unknown and translate active scheduler states", async () => {
   const ui = page(); await flush();
   const detail = textOf(ui.elements.get("schedule-details"));
-  assert.match(detail, /运行版本：未知 \/ 页面 v2\.8\.0/);
+  assert.match(detail, /运行版本：未知 \/ 页面 v2\.8\.1/);
   assert.match(detail, /已采集原文：—/);
   assert.match(detail, /待整理对话：—/);
   assert.match(detail, /待确认记忆：—/);

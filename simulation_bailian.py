@@ -5,17 +5,23 @@ import os
 
 import aiohttp
 
-MISSING_KEY = "请在 AstrBot 运行环境中设置 DASHSCOPE_API_KEY，并重启 AstrBot 进程。"
+from .settings import BAILIAN_KEY_FORMAT, configured_bailian_key
+
+MISSING_KEY = "请在「设置与方向 → 模型与预算」填写并保存「百炼试聊 API Key」。"
 
 
-def api_key():
-    return os.environ.get("DASHSCOPE_API_KEY", "").strip()
+def api_key(config):
+    return (
+        configured_bailian_key(config)
+        or os.environ.get("DASHSCOPE_API_KEY", "").strip()
+    )
 
 
-async def generate(workspace, model_code, system, messages, max_tokens):
-    key = api_key()
+async def generate(workspace, model_code, system, messages, max_tokens, key):
     if not key:
         raise ValueError(MISSING_KEY)
+    if not BAILIAN_KEY_FORMAT.fullmatch(key):
+        raise ValueError("百炼试聊 API Key 格式无效，请检查插件密钥配置")
     url = (
         f"https://{workspace}.cn-beijing.maas.aliyuncs.com"
         "/api/v1/services/aigc/text-generation/generation"

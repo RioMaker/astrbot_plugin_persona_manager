@@ -263,7 +263,7 @@ function renderCoreDirty() {
 const settingsLayout = [
   { id: "rhythm", title: "整理节奏", caption: "什么时候开始思考", description: "按群积累已回复的对话，达到门槛后批量整理；可修改发到群里的思考提示，整理仍受时段、间隔与预算约束。", fields: ["enabled", "learning_enabled", "persona_id", "memory_enabled", "memory_batch_threshold", "batch_size", "thinking_notice", "thinking_notice_text"] },
   { id: "lifecycle", title: "记忆生命周期", caption: "七类记忆如何留存", description: "短期按时间、入梦或容量清理；长期保留来源、证据与审核状态。", fields: ["short_cache_capacity", "auto_dream", "dream_hour", "knowledge_confirmations", "event_salience_threshold"] },
-  { id: "budget", title: "模型与预算", caption: "模型选择与用量上限", description: "在此选择群聊、后台整理和百炼试聊模型。记忆整理按输入与输出合计记账，1 Mtokens = 100 万 tokens。", fields: ["local_chat_provider_id", "learning_provider_id", "bailian_workspace_id", "bailian_model_codes", "memory_daily_mtokens", "memory_monthly_mtokens", "model_timeout_seconds", "max_output_tokens", "daily_calls", "daily_group_calls", "daily_token_limit", "daily_group_token_limit"] },
+  { id: "budget", title: "模型与预算", caption: "模型选择与用量上限", description: "在此选择群聊、后台整理和百炼试聊模型。记忆整理按输入与输出合计记账，1 Mtokens = 100 万 tokens。", fields: ["local_chat_provider_id", "learning_provider_id", "bailian_api_key", "bailian_workspace_id", "bailian_model_codes", "memory_daily_mtokens", "memory_monthly_mtokens", "model_timeout_seconds", "max_output_tokens", "daily_calls", "daily_group_calls", "daily_token_limit", "daily_group_token_limit"] },
   { id: "groups", title: "群与共享", caption: "各群模型、记忆与表达", description: "为门禁放行的群选择聊天模型，设置记忆与表达权限。每个群可单独开启公共记忆读取。", fields: ["local_chat_groups", "memory_default_enabled", "observation_groups", "memory_groups", "memory_disabled_groups", "public_memory_groups", "global_style_groups", "group_tags", "ignored_qq"] },
   { id: "expression", title: "表达与方向", caption: "怎么回忆、怎样表达", description: "调整聊天时的记忆与表达用量，设置成长方向；固定核心人设仍单独管理。", fields: ["evolution_guidance", "expression_per_turn", "expression_cooldown_seconds", "memory_context_chars", "expression_context_chars"] },
   { id: "advanced", title: "高级选项", caption: "学习时段与原文保留", description: "旁听积累、学习时段、原文长度与保留时间。互动记忆的数量门槛在“整理节奏”中设置。", fields: ["price_aware_learning", "learning_windows", "cheap_learning_windows", "min_observation_batch", "cheap_observation_batch", "learning_interval_seconds", "cheap_learning_interval_seconds", "max_learning_wait_seconds", "max_source_chars", "max_batch_chars", "max_context_chars", "observation_retention_hours", "interaction_retention_days", "regular_interaction_batch", "cheap_interaction_batch"] },
@@ -635,6 +635,10 @@ function renderConfig({ replace = false } = {}) {
       control.type = "checkbox";
       control.checked = configBase[name] === true;
       field.classList.add("check-field");
+    } else if (schema.secret) {
+      control = node("input");
+      control.type = "password";
+      control.placeholder = schema.configured ? "已配置，输入新密钥可替换" : "输入 API Key";
     } else if (Array.isArray(schema.options) && schema.options.length) {
       control = node("select");
       schema.options.forEach((item) => {
@@ -680,7 +684,7 @@ function renderConfig({ replace = false } = {}) {
     }
     control.id = `setting-${name}`;
     control.name = name;
-    control.autocomplete = "off";
+    control.autocomplete = schema.secret ? "new-password" : "off";
     if (schema.type === "bool") control.setAttribute("role", "switch");
     control.addEventListener(schema.type === "bool" || control.tagName === "SELECT" ? "change" : "input", updateConfigDirty);
     field.append(label);
@@ -774,12 +778,15 @@ async function saveSettings() {
       throw error;
     }
     if (result?.saved !== true) throw new Error("后台未确认配置保存成功，草稿已保留。");
+    for (const name of Object.keys(values)) {
+      if (configSchema[name]?.secret) configControls.get(name).value = "";
+    }
     configDirty = false;
     configRevision = "";
     if (changesPersona) { selectedPersona = ""; selectedUser = ""; selectedScope = ""; coreDirty = false; }
     try { await loadState({ replaceCore: changesPersona }); }
     catch (error) { configDirty = true; throw new Error(`配置已保存，但刷新失败；请重载核对结果，暂勿重复保存：${error?.message || "连接中断"}`); }
-  }, "设置已保存，后续学习将使用新配置。");
+  }, "设置已保存。");
 }
 
 const counter = (value) => typeof value === "number" && Number.isFinite(value) && value >= 0 ? value : null;
@@ -827,7 +834,7 @@ function renderOverview() {
   details.replaceChildren();
   const status = object(state.status);
   const capture = object(status.capture);
-  addMeta(details, "运行版本", `${status.runtime_version ? `v${status.runtime_version}` : "未知"} / 页面 v2.8.0`);
+  addMeta(details, "运行版本", `${status.runtime_version ? `v${status.runtime_version}` : "未知"} / 页面 v2.8.1`);
   addMeta(details, "已采集原文", countText(status.sources));
   addMeta(details, "待整理对话", countText(status.pending_interactions));
   addMeta(details, "生效记忆", countText(status.memories));

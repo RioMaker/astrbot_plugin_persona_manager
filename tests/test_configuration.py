@@ -2,9 +2,12 @@
 
 import asyncio
 import json
+import os
 from types import SimpleNamespace
+from unittest.mock import AsyncMock
 
 import pytest
+from astrbot_plugin_persona_manager import simulation_bailian
 from astrbot_plugin_persona_manager.configuration import (
     SCHEMA,
     page_config,
@@ -42,7 +45,7 @@ class SavedConfig(dict):
 def test_every_native_setting_has_a_dashboard_control():
     result = page_config({})
     assert set(result["values"]) == set(result["schema"]) == set(SCHEMA)
-    assert len(SCHEMA) == 54
+    assert len(SCHEMA) == 55
     assert all(field["section"] for field in result["schema"].values())
     assert "api_key" not in result["values"]
     assert result["schema"]["daily_token_limit"]["minimum"] == 0
@@ -72,6 +75,7 @@ def test_every_native_setting_has_a_dashboard_control():
         {"observation_groups": ["任意群"]},
         {"ignored_qq": ["qq:12345"]},
         {"bailian_workspace_id": "https://other.example"},
+        {"bailian_api_key": "test\ninvalid-header"},
         {"bailian_model_codes": ["two IDs"]},
         {"learning_windows": ["23:00-99:00"]},
         {"cheap_learning_windows": ["12:00-12:00"]},
@@ -117,7 +121,10 @@ def test_saving_bailian_deployments_updates_simulator_without_interrupting_learn
 ):
     async def run():
         config = SavedConfig(
-            tmp_path / "native.json", local_chat_provider_id="existing-model"
+            tmp_path / "native.json",
+            local_chat_provider_id="existing-model",
+            memory_batch_threshold=20,
+            batch_size=8,
         )
         async with entry.running(config=config) as env:
             epoch = env.plugin.store.epoch()
@@ -133,11 +140,83 @@ def test_saving_bailian_deployments_updates_simulator_without_interrupting_learn
             persisted = json.loads(config.path.read_text(encoding="utf-8"))
             assert persisted["bailian_model_codes"] == ["next-model"]
             assert persisted["local_chat_provider_id"] == "existing-model"
+            assert (
+                persisted["memory_batch_threshold"] == 20
+                and persisted["batch_size"] == 8
+            )
             state = await env.plugin.page_state()
             assert [
                 m["id"] for m in state["simulation_models"] if m["kind"] == "bailian"
             ] == ["bailian:ws-other:next-model"]
             assert env.plugin.store.epoch() == epoch
+
+    asyncio.run(run())
+
+
+def test_plugin_key_is_private_and_live_without_changing_other_settings(
+    entry, tmp_path, monkeypatch
+):
+    monkeypatch.setenv("DASHSCOPE_API_KEY", "shared-environment-key")
+    generate = AsyncMock(return_value="试聊回答")
+    monkeypatch.setattr(simulation_bailian, "generate", generate)
+
+    async def run():
+        config = SavedConfig(
+            tmp_path / "native.json",
+            local_chat_provider_id="existing-model",
+            learning_provider_id="business-model",
+            evolution_guidance="  原有设置  ",
+        )
+        async with entry.running(config=config) as env:
+            before = dict(config)
+            epoch = env.plugin.store.epoch()
+            initial_revision = revision(config)
+
+            async def save(changes, *, version=None):
+                env.request.payload = {
+                    "action": "config_save",
+                    "revision": version or revision(config),
+                    "values": changes,
+                }
+                return await env.plugin.page_action()
+
+            assert (await save({"bailian_api_key": "plugin-only-key"}))["saved"]
+            assert dict(config) == {**before, "bailian_api_key": "plugin-only-key"}
+            assert json.loads(config.path.read_text(encoding="utf-8")) == dict(config)
+            state = await env.plugin.page_state()
+            assert "plugin-only-key" not in json.dumps(state)
+            assert "shared-environment-key" not in json.dumps(state)
+            field = state["config"]["schema"]["bailian_api_key"]
+            assert field["secret"] is True and field["configured"] is True
+            assert state["config"]["values"]["bailian_api_key"] == ""
+            assert (
+                await save({"bailian_api_key": "stale-key"}, version=initial_revision)
+            ).status_code == 409
+            cloud = next(
+                row for row in state["simulation_models"] if row["kind"] == "bailian"
+            )
+
+            async def check_request(expected):
+                env.request.payload = {
+                    "action": "send",
+                    "model": cloud["id"],
+                    "message": "试聊",
+                }
+                assert (await env.plugin.page_simulation())["status"] == "running"
+                await env.plugin.simulation.task
+                assert generate.await_args.args[-1] == expected
+                assert os.environ["DASHSCOPE_API_KEY"] == "shared-environment-key"
+
+            await check_request("plugin-only-key")
+            assert (await save({"bailian_api_key": "replacement-key"}))["saved"]
+            await check_request("replacement-key")
+            assert env.plugin.store.epoch() == epoch
+            assert (await save({"daily_calls": 8}))["saved"]
+            assert config["bailian_api_key"] == "replacement-key"
+            assert (await save({"bailian_api_key": ""}))["saved"]
+            await check_request("shared-environment-key")
+            env.context.llm_generate.assert_not_awaited()
+            env.context.send_message.assert_not_awaited()
 
     asyncio.run(run())
 
@@ -306,7 +385,7 @@ def test_state_exposes_settings_and_safe_selector_labels_only(entry):
             ]
             result = await route(env.context, "state")()
             assert result.status_code == 200
-            assert len(result["config"]["schema"]) == 54
+            assert len(result["config"]["schema"]) == 55
             assert result["choices"]["providers"] == [
                 {"id": "existing-model", "label": "existing-model"}
             ]
