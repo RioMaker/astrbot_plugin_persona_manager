@@ -876,7 +876,7 @@ test("overview separates captured dialogue, pending extraction and stored memory
   ui.view.schedule = { state: "budget", reason: "预计 20009 tokens，单次上限 20000 tokens", groups: [] };
   await vm.runInContext("loadState()", ui.sandbox);
   const detail = textOf(ui.elements.get("schedule-details"));
-  assert.match(detail, /运行版本：v2\.2\.1 \/ 页面 v2\.9\.1/);
+  assert.match(detail, /运行版本：v2\.2\.1 \/ 页面 v2\.10\.0/);
   assert.match(detail, /已采集原文：24/);
   assert.match(detail, /待整理对话：20/);
   assert.match(detail, /生效记忆：0/);
@@ -915,7 +915,7 @@ test("empty learning calls explain zero capture, paused and disabled learning wi
 test("legacy overview diagnostics remain unknown and translate active scheduler states", async () => {
   const ui = page(); await flush();
   const detail = textOf(ui.elements.get("schedule-details"));
-  assert.match(detail, /运行版本：未知 \/ 页面 v2\.9\.1/);
+  assert.match(detail, /运行版本：未知 \/ 页面 v2\.10\.0/);
   assert.match(detail, /已采集原文：—/);
   assert.match(detail, /待整理对话：—/);
   assert.match(detail, /待确认记忆：—/);
@@ -986,6 +986,38 @@ test("group switches save independent native settings without typing IDs", async
   assert.equal(ui.elements.get("group-local-qq-main-234567").checked, true);
   await ui.elements.get("settings-form").handlers.submit({ preventDefault() {} });
   assert.deepEqual(ui.posts[0].payload.values, {observation_groups:["qq-main:234567"], memory_groups:["qq-main:456789"], local_chat_groups:["qq-main:234567"]});
+});
+
+test("Bailian trials select, switch and clear only the chosen group connection", async () => {
+  const ui = page(); await flush();
+  const prefix = "bailian:ws-test:";
+  const eight = prefix + "qwen3-8b-d39bed90dfab";
+  const four = prefix + "qwen3-4b-instruct-2507-438f534673d5-v1";
+  ui.view.simulation_models.push(
+    { id: eight, kind: "bailian", group_trial_label: "群聊微调 Qwen3-8B v2" },
+    { id: four, kind: "bailian", group_trial_label: "六爻 Qwen3-4B" },
+    { id: prefix + "custom", kind: "bailian", label: "其他试聊部署" },
+  );
+  ui.view.groups = [knownGroup(), knownGroup("qq-second")];
+  const other = "qq-second:234567=" + four;
+  const hidden = "offline:456789=" + eight;
+  ui.view.config.values.bailian_group_models = [hidden, other];
+  ui.view.config.values.local_chat_groups = ["qq-main:234567"];
+  await vm.runInContext("loadState()", ui.sandbox);
+  const picker = () => ui.elements.get("group-trial-qq-main-234567");
+  assert.equal(picker().value, "");
+  assert.deepEqual(picker().children.map((option) => option.value), ["", eight, four]);
+  assert.equal(ui.posts.length, 0);
+  for (const model of [eight, four, ""]) {
+    picker().value = model; picker().handlers.change();
+    assert.equal(ui.elements.get("group-trial-qq-second-234567").value, four);
+    assert.equal(ui.elements.get("group-local-qq-main-234567").checked, true);
+    await ui.elements.get("settings-form").handlers.submit({ preventDefault() {} });
+    const expected = [hidden, other];
+    if (model) expected.push("qq-main:234567=" + model);
+    assert.deepEqual(ui.posts.at(-1).payload.values, {bailian_group_models: expected.sort()});
+    assert.equal(picker().value, model);
+  }
 });
 
 test("disabling one connection preserves another connection and unrelated legacy IDs", async () => {

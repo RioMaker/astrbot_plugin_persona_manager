@@ -1,4 +1,4 @@
-"""DashScope text generation for the Dashboard simulator."""
+"""DashScope generation and AstrBot adapters for the configured Beijing workspace."""
 
 import asyncio
 import os
@@ -34,6 +34,26 @@ def validate_key(key):
         raise ValueError(MISSING_KEY)
     if not BAILIAN_KEY_FORMAT.fullmatch(key):
         raise ValueError("百炼试聊 API Key 格式无效，请检查插件密钥配置")
+
+
+def create_agent_provider(config, workspace, model, provider_id):
+    key = api_key(config)
+    validate_key(key)
+    from astrbot.core.provider.sources.openai_source import ProviderOpenAIOfficial
+
+    return ProviderOpenAIOfficial(
+        {
+            "id": provider_id,
+            "type": "openai_chat_completion",
+            "model": model,
+            "key": [key],
+            "api_base": f"https://{workspace}.cn-beijing.maas.aliyuncs.com/compatible-mode/v1",
+            "modalities": ["text", "tool_use"],
+            "timeout": 360,
+            "custom_extra_body": {"max_tokens": 512, "enable_thinking": False},
+        },
+        {},
+    )
 
 
 async def generate(workspace, model_code, system, messages, max_tokens, key):

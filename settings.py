@@ -13,6 +13,27 @@ BAILIAN_MODEL_CODE = re.compile(r"[A-Za-z0-9][A-Za-z0-9._:/-]{0,199}")
 BAILIAN_KEY_FORMAT = re.compile(r"[!-~]+")
 BAILIAN_LIUYAO_MODEL = "qwen3-4b-instruct-2507-438f534673d5-v1"
 BAILIAN_GROUP_CHAT_MODEL = "qwen3-8b-d39bed90dfab"
+BAILIAN_TRIAL_MODELS = {
+    BAILIAN_GROUP_CHAT_MODEL: "群聊微调 Qwen3-8B v2",
+    BAILIAN_LIUYAO_MODEL: "六爻 Qwen3-4B",
+}
+_GROUP_CONNECTION = re.compile(r"[^\s:=]{1,100}:[1-9][0-9]{3,19}")
+
+
+def parse_trial_binding(entry: str) -> tuple[str, str, str]:
+    scope, _, target = entry.partition("=")
+    kind, _, deployment = target.partition(":")
+    workspace, _, code = deployment.partition(":")
+    if not (
+        _GROUP_CONNECTION.fullmatch(scope)
+        and kind == "bailian"
+        and BAILIAN_WORKSPACE_ID.fullmatch(workspace)
+        and code in BAILIAN_TRIAL_MODELS
+    ):
+        raise ValueError(
+            "百炼测试群须逐行填写 平台实例ID:群号=bailian:业务空间ID:预置模型调用ID"
+        )
+    return scope, workspace, code
 
 
 INT_LIMITS = {
@@ -95,9 +116,14 @@ class Settings:
     ignored_qq: frozenset[str] = field(default_factory=frozenset)
     local_chat_provider_id: str = ""
     local_chat_groups: frozenset[str] = field(default_factory=frozenset)
-    bailian_workspace_id: str = "llm-qd5s21mahp3999y0"
-    bailian_model_codes: frozenset[str] = frozenset(
-        {BAILIAN_LIUYAO_MODEL, BAILIAN_GROUP_CHAT_MODEL}
+    # Foreground trials have their own per-group recheck. Editing one must
+    # not invalidate another group's background learning or memory tools.
+    bailian_group_models: frozenset[str] = field(
+        default_factory=frozenset, compare=False
+    )
+    bailian_workspace_id: str = field(default="llm-qd5s21mahp3999y0", compare=False)
+    bailian_model_codes: frozenset[str] = field(
+        default=frozenset(BAILIAN_TRIAL_MODELS), compare=False
     )
     learning_enabled: bool = True
     learning_provider_id: str = ""
@@ -161,6 +187,7 @@ class Settings:
         for name in (
             "observation_groups",
             "local_chat_groups",
+            "bailian_group_models",
             "global_style_groups",
             "group_tags",
             "memory_groups",
@@ -197,6 +224,21 @@ class Settings:
 
     def group_in(self, group_id: str, platform_id: str, values: frozenset[str]) -> bool:
         return group_id in values or f"{platform_id}:{group_id}" in values
+
+    def trial_model_for(self, group_id: str, platform_id: str) -> str:
+        prefix = f"{platform_id}:{group_id}="
+        matches = [
+            entry for entry in self.bailian_group_models if entry.startswith(prefix)
+        ]
+        if len(matches) != 1:
+            return ""
+        try:
+            _, workspace, code = parse_trial_binding(matches[0])
+        except ValueError:
+            return ""
+        if workspace == self.bailian_workspace_id and code in self.bailian_model_codes:
+            return code
+        return ""
 
     def observes(self, group_id: str, platform_id: str) -> bool:
         return self.group_in(group_id, platform_id, self.observation_groups)

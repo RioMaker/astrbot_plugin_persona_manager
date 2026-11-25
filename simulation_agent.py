@@ -92,36 +92,30 @@ async def _provider(context, plugin_config, job, provider_id, engine):
 
     # Use the framework's tool-call parser and transport contract without
     # registering a provider globally or changing another chat's selected model.
-    config = {
-        "type": "openai_chat_completion",
-        "id": job.model,
-        "modalities": ["text", "tool_use"],
-        "timeout": 360,
-        "custom_extra_body": {"max_tokens": 512},
-    }
     if engine is not None:
-        config.update(
-            model=job.model,
-            api_base="http://localhost/v1",
-            key=["local"],
-            socket=engine.client.connector.path,
-            max_context_tokens=engine.context_size,
+        provider = _LocalProvider(
+            {
+                "type": "openai_chat_completion",
+                "id": job.model,
+                "model": job.model,
+                "modalities": ["text", "tool_use"],
+                "timeout": 360,
+                "custom_extra_body": {"max_tokens": 512},
+                "api_base": "http://localhost/v1",
+                "key": ["local"],
+                "socket": engine.client.connector.path,
+                "max_context_tokens": engine.context_size,
+            },
+            {},
         )
-        provider = _LocalProvider(config, {})
     else:
         _, workspace, model = job.model.split(":", 2)
-        key = simulation_bailian.api_key(plugin_config)
         try:
-            simulation_bailian.validate_key(key)
+            provider = simulation_bailian.create_agent_provider(
+                plugin_config, workspace, model, job.model
+            )
         except ValueError as exc:
             raise SimulationToolError(str(exc)) from None
-        config.update(
-            model=model,
-            key=[key],
-            api_base=f"https://{workspace}.cn-beijing.maas.aliyuncs.com/compatible-mode/v1",
-        )
-        config["custom_extra_body"]["enable_thinking"] = False
-        provider = ProviderOpenAIOfficial(config, {})
     try:
         yield provider
     finally:

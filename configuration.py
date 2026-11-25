@@ -16,6 +16,7 @@ from .settings import (
     TEXT_LIMITS,
     Settings,
     configured_bailian_key,
+    parse_trial_binding,
 )
 from .style_matching import parse_tag_entry
 
@@ -23,7 +24,12 @@ SCHEMA = json.loads(
     (Path(__file__).parent / "_conf_schema.json").read_text(encoding="utf-8")
 )
 BAILIAN_FIELDS = frozenset(
-    {"bailian_api_key", "bailian_workspace_id", "bailian_model_codes"}
+    {
+        "bailian_api_key",
+        "bailian_workspace_id",
+        "bailian_model_codes",
+        "bailian_group_models",
+    }
 )
 SECTIONS = {
     "记忆整理与入梦": {
@@ -47,6 +53,7 @@ SECTIONS = {
         "persona_id",
         "observation_groups",
         "local_chat_groups",
+        "bailian_group_models",
         "global_style_groups",
         "group_tags",
         "memory_enabled",
@@ -63,7 +70,7 @@ SECTIONS = {
         "batch_size",
         "model_timeout_seconds",
     }
-    | BAILIAN_FIELDS,
+    | (BAILIAN_FIELDS - {"bailian_group_models"}),
     "Token 预算": {
         "daily_calls",
         "daily_group_calls",
@@ -170,6 +177,10 @@ def validate_changes(current, changes) -> dict:
             if key == "bailian_model_codes":
                 if any(not BAILIAN_MODEL_CODE.fullmatch(code) for code in value):
                     raise ValueError("请逐行填写有效的百炼模型调用 ID（ModelCode）")
+            elif key == "bailian_group_models":
+                scopes = [parse_trial_binding(item)[0] for item in value]
+                if len(set(scopes)) != len(scopes):
+                    raise ValueError("同一连接的群只能选择一个百炼测试模型")
             elif key == "group_tags":
                 parsed = [parse_tag_entry(item) for item in value]
                 if len({key for key, _ in parsed}) != len(parsed):
@@ -206,6 +217,19 @@ def validate_changes(current, changes) -> dict:
             ):
                 raise ValueError("请填写百炼北京业务空间 ID，例如 llm-xxx 或 ws-xxx")
         result[key] = value
+    if "bailian_group_models" in changes:
+        # Retain other groups' saved bindings when a deployment is offline.
+        added = (
+            set(result["bailian_group_models"])
+            - Settings.read(current).bailian_group_models
+        )
+        for entry in added:
+            _, workspace, code = parse_trial_binding(entry)
+            if (
+                workspace != result["bailian_workspace_id"]
+                or code not in result["bailian_model_codes"]
+            ):
+                raise ValueError("所选百炼测试模型未在当前业务空间的试聊模型列表中启用")
     if changes.keys() <= BAILIAN_FIELDS:
         return result
     thresholds = []

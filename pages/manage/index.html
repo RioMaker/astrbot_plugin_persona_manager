@@ -5,7 +5,7 @@
     <meta name="viewport" content="width=device-width, initial-scale=1" />
     <meta name="color-scheme" content="light dark" />
     <title>可可子 · 人格管理</title>
-    <link rel="stylesheet" href="./style.css?v=2.9.1" />
+    <link rel="stylesheet" href="./style.css?v=2.10.0" />
   </head>
   <body>
     <main class="shell" id="app" aria-busy="true">
@@ -102,7 +102,7 @@
             <div id="settings-sections" class="settings-sections"></div>
           </div>
           <article id="settings-group-picker" class="group-picker" aria-labelledby="group-picker-title" hidden>
-            <div class="item-header"><div><h3 id="group-picker-title">选择学习的群</h3><p class="muted small">门禁放行的群默认启用互动记忆；公共记忆与跨群表达默认关闭。修改后点击“保存设置”。</p></div><span id="group-count" class="count">0 个群</span></div>
+            <div class="item-header"><div><h3 id="group-picker-title">各群的模型与学习设置</h3><p class="muted small">百炼测试默认关闭，启用后优先于本群勾选的本地模型。修改后点击“保存设置”。</p></div><span id="group-count" class="count">0 个群</span></div>
             <div class="group-filters"><div class="field grow"><label for="group-search">搜索群</label><input id="group-search" type="search" placeholder="群名、群号、连接或标签" autocomplete="off" /></div><div class="field"><label for="group-filter">显示范围</label><select id="group-filter"><option value="all">所有已发现的群</option><option value="selected">已开启功能</option><option value="unselected">所有开关均关闭</option></select></div></div>
             <p id="group-learning-note" class="muted small"></p>
             <div id="group-list" class="group-list" aria-live="polite"></div>
@@ -232,6 +232,6 @@
       <div id="memory-detail-fields"></div><p id="memory-detail-error" class="field-error" role="alert"></p>
       <div class="dialog-actions"><button id="memory-detail-cancel" type="button">取消</button><button type="submit" class="primary">保存修改</button></div>
     </form></dialog>
-    <script type="module" src="./app.js?v=2.9.1"></script>
+    <script type="module" src="./app.js?v=2.10.0"></script>
   </body>
 </html>

@@ -13,13 +13,14 @@ from astrbot.api import AstrBotConfig, logger
 from astrbot.api.event import AstrMessageEvent, filter
 from astrbot.api.provider import ProviderRequest
 from astrbot.api.star import Context, Star
-from astrbot.api.web import error_response, json_response, request
 from astrbot.core.agent.message import TextPart
 from astrbot.core.message.message_event_result import ResultContentType
 from astrbot.core.star.session_llm_manager import SessionServiceManager
 from astrbot.core.star.session_plugin_manager import SessionPluginManager
 from astrbot.core.utils.astrbot_path import get_astrbot_data_path
 
+from . import simulation_bailian
+from .bailian_group_chat import GroupTrialProviders
 from .configuration import (
     BAILIAN_FIELDS,
     page_config,
@@ -38,8 +39,15 @@ from .simulation import SEED_SOURCE, Simulation, SimulationBusy, chat_messages
 from .storage import Store
 from .temporal import BEIJING
 
+try:
+    from astrbot.api.web import error_response, json_response, request
+except ModuleNotFoundError as exc:
+    if exc.name != "astrbot.api.web":
+        raise
+    from .legacy_web import error_response, json_response, request
+
 PLUGIN_NAME = "astrbot_plugin_persona_manager"
-PLUGIN_VERSION = "2.9.1"
+PLUGIN_VERSION = "2.10.0"
 GATE_NAME = "astrbot_plugin_access_gate"
 PENDING_KEY = PLUGIN_NAME + ":interaction"
 SENT_KEY = PLUGIN_NAME + ":sent"
@@ -66,6 +74,7 @@ class PersonaManagerPlugin(Star):
         )
         self.store = Store(path)
         self.simulation = Simulation(path.parent / "simulation", context, config)
+        self.group_trials = GroupTrialProviders(context, logger)
         self.runtime = Runtime(
             self.store,
             context,
@@ -445,13 +454,22 @@ class PersonaManagerPlugin(Star):
     @filter.on_waiting_llm_request(priority=-100)
     async def select_local_chat(self, event: AstrMessageEvent):
         settings = self.settings()
-        if not settings.local_chat_provider_id or not settings.local_chat_groups:
+        if not settings.bailian_group_models and not (
+            settings.local_chat_provider_id and settings.local_chat_groups
+        ):
             return
         try:
             source = group_identity(event, settings)
-            if source is None or not settings.group_in(
-                source["group_id"], source["platform_id"], settings.local_chat_groups
-            ):
+            if source is None:
+                return
+            group_id, platform_id = source["group_id"], source["platform_id"]
+            trial = settings.trial_model_for(group_id, platform_id)
+            provider_id = (
+                settings.local_chat_provider_id
+                if settings.group_in(group_id, platform_id, settings.local_chat_groups)
+                else ""
+            )
+            if not trial and not provider_id:
                 return
             if (
                 event.call_llm
@@ -468,13 +486,39 @@ class PersonaManagerPlugin(Star):
             ) is None and not self._uses_native_wake(event):
                 return
             source["umo"] = event.unified_msg_origin
-            if await self._source_allowed(source) and self.settings() == settings:
-                # The native runner resolves this event-scoped ID before building the request.
-                event.set_extra("selected_provider", settings.local_chat_provider_id)
+            if not await self._source_allowed(source):
+                return
+            current = self.settings()
+            if (
+                current != settings
+                or current.trial_model_for(group_id, platform_id) != trial
+            ):
+                return
+            if trial:
+                if current.bailian_workspace_id != settings.bailian_workspace_id:
+                    return
+                try:
+                    provider_id = self.group_trials.bind(
+                        self.config, current.bailian_workspace_id, trial
+                    )
+                    logger.info(
+                        "[可可子人格] %s 群 %s 本轮选用百炼测试模型 %s",
+                        platform_id,
+                        group_id,
+                        trial,
+                    )
+                except Exception as exc:
+                    logger.warning(
+                        "[可可子人格] %s 群 %s 的百炼测试模型 %s 未就绪（%s），沿用原群模型。",
+                        platform_id,
+                        group_id,
+                        trial,
+                        type(exc).__name__,
+                    )
+            if provider_id:
+                event.set_extra("selected_provider", provider_id)
         except Exception:
-            logger.warning(
-                "[可可子人格] 无法核实本次群聊的本地模型选择，沿用会话设置。"
-            )
+            logger.warning("[可可子人格] 无法核实本次群聊的模型选择，沿用会话设置。")
 
     @filter.on_llm_request(priority=-100)
     async def on_request(self, event: AstrMessageEvent, req: ProviderRequest):
@@ -821,6 +865,10 @@ class PersonaManagerPlugin(Star):
             )
         updated = validate_changes(self.config, payload.get("values"))
         changed = payload["values"]
+        if "bailian_group_models" in changed and (
+            set(updated["bailian_group_models"]) - self.settings().bailian_group_models
+        ):
+            simulation_bailian.validate_key(simulation_bailian.api_key(updated))
         if "persona_id" in changed:
             persona = await self.context.persona_manager.get_persona(
                 updated["persona_id"]
@@ -857,7 +905,7 @@ class PersonaManagerPlugin(Star):
         sync_save = getattr(self.config, "save_config", None)
         if not callable(async_save) and not callable(sync_save):
             raise ValueError("当前 AstrBot 配置保存接口不可用")
-        # Simulator deployments do not participate in background extraction.
+        # Foreground Bailian choices do not participate in background extraction.
         if invalidate:
             await self.runtime.db("invalidate")
         if expected_revision is not None and expected_revision != revision(self.config):
@@ -1260,6 +1308,7 @@ class PersonaManagerPlugin(Star):
 
     async def terminate(self):
         self._debug.clear()
+        await self.group_trials.close()
         await self.simulation.close()
         await self.discovery.close()
         await self.runtime.close()

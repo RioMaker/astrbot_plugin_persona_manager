@@ -16,7 +16,11 @@ from astrbot_plugin_persona_manager.configuration import (
     validate_changes,
 )
 from astrbot_plugin_persona_manager.ingress import sample
-from astrbot_plugin_persona_manager.settings import Settings
+from astrbot_plugin_persona_manager.settings import (
+    BAILIAN_GROUP_CHAT_MODEL,
+    BAILIAN_LIUYAO_MODEL,
+    Settings,
+)
 from astrbot_plugin_persona_manager.tests import test_integration as integration
 from astrbot_plugin_persona_manager.tests.astrbot_stub import MockEvent
 
@@ -45,7 +49,7 @@ class SavedConfig(dict):
 def test_every_native_setting_has_a_dashboard_control():
     result = page_config({})
     assert set(result["values"]) == set(result["schema"]) == set(SCHEMA)
-    assert len(SCHEMA) == 55
+    assert len(SCHEMA) == 56
     assert all(field["section"] for field in result["schema"].values())
     assert "api_key" not in result["values"]
     assert result["schema"]["daily_token_limit"]["minimum"] == 0
@@ -57,6 +61,40 @@ def test_every_native_setting_has_a_dashboard_control():
     assert revision({"observation_groups": ["456789", "234567"]}) == revision(
         {"observation_groups": ["234567", "456789"]}
     )
+
+
+def test_quart_dashboard_reads_group_settings_under_the_authenticated_identity(
+    entry, monkeypatch, tmp_path
+):
+    quart = pytest.importorskip("quart", reason="旧版 AstrBot 管理页使用 Quart")
+    from astrbot_plugin_persona_manager import legacy_web
+
+    for name in ("request", "json_response", "error_response"):
+        monkeypatch.setattr(entry.module, name, getattr(legacy_web, name))
+    app = quart.Quart(__name__)
+    binding = f"qq-main:234567=bailian:{Settings.bailian_workspace_id}:{BAILIAN_GROUP_CHAT_MODEL}"
+
+    async def run():
+        cfg = SavedConfig(tmp_path / "settings.json", bailian_api_key="test-key")
+        async with entry.running(cfg) as env:
+            body = {
+                "action": "config_save",
+                "revision": revision(cfg),
+                "values": {"bailian_group_models": [binding]},
+            }
+            async with app.test_request_context("/action", method="POST", json=body):
+                assert (await env.plugin.page_action()).status_code == 403
+                quart.g.username = "dashboard-admin"
+                saved = await env.plugin.page_action()
+                assert saved.status_code == 200 and (await saved.get_json())["saved"]
+            async with app.test_request_context(
+                "/state", query_string={"persona_id": "可可子"}
+            ):
+                quart.g.username = "dashboard-admin"
+                state = await (await env.plugin.page_state()).get_json()
+                assert state["config"]["values"]["bailian_group_models"] == [binding]
+
+    asyncio.run(run())
 
 
 @pytest.mark.parametrize(
@@ -114,6 +152,76 @@ def test_bailian_model_settings_accept_new_deployments_and_explicit_empty_lists(
     assert not Settings.read(
         {"bailian_workspace_id": "ws.example/path"}
     ).bailian_workspace_id
+
+
+def test_trial_bindings_require_one_known_deployment_and_an_exact_group():
+    first = f"bailian:ws-test:{BAILIAN_GROUP_CHAT_MODEL}"
+    second = f"bailian:ws-test:{BAILIAN_LIUYAO_MODEL}"
+    config = {"bailian_workspace_id": "ws-test"}
+    for entries in (
+        [f"234567={first}"],
+        [f"qq-main:*={first}"],
+        [f"qq-main:234567={first}", f"qq-main:234567={second}"],
+        [f"qq-main:234567=bailian:ws-other:{BAILIAN_LIUYAO_MODEL}"],
+        ["qq-main:234567=bailian:ws-test:custom"],
+    ):
+        with pytest.raises(ValueError):
+            validate_changes(config, {"bailian_group_models": entries})
+        assert not Settings.read(
+            {**config, "bailian_group_models": entries}
+        ).trial_model_for("234567", "qq-main")
+
+
+def test_saving_group_trials_uses_existing_key_and_keeps_other_groups_learning(
+    entry, tmp_path, monkeypatch
+):
+    monkeypatch.delenv("DASHSCOPE_API_KEY", raising=False)
+    binding = f"qq-main:234567=bailian:{Settings.bailian_workspace_id}:{BAILIAN_GROUP_CHAT_MODEL}"
+
+    async def run():
+        path = tmp_path / "native.json"
+        cfg = SavedConfig(path, batch_size=8, memory_batch_threshold=20)
+        async with entry.running(config=cfg) as env:
+            epoch = env.plugin.store.epoch()
+            baseline = env.plugin.settings()
+
+            async def save(values):
+                env.request.payload = {
+                    "action": "config_save",
+                    "revision": revision(cfg),
+                    "values": values,
+                }
+                return await env.plugin.page_action()
+
+            assert (await save({"bailian_group_models": [binding]})).status_code == 400
+            assert not path.exists()
+            assert (
+                await save(
+                    {"bailian_group_models": [binding], "bailian_api_key": "test-key"}
+                )
+            )["saved"]
+            assert json.loads(path.read_text(encoding="utf-8"))[
+                "bailian_group_models"
+            ] == [binding]
+            assert (
+                env.plugin.settings().trial_model_for("234567", "qq-main")
+                == BAILIAN_GROUP_CHAT_MODEL
+            )
+            assert env.plugin.settings() == baseline
+            state = await env.plugin.page_state()
+            assert "test-key" not in json.dumps(state)
+            assert {
+                m["group_trial_label"]
+                for m in state["simulation_models"]
+                if m.get("group_trial_label")
+            } == {"六爻 Qwen3-4B", "群聊微调 Qwen3-8B v2"}
+            assert (await save({"bailian_workspace_id": "ws-new"}))["saved"]
+            assert not env.plugin.settings().trial_model_for("234567", "qq-main")
+            assert (await save({"bailian_group_models": []}))["saved"]
+            assert cfg["bailian_api_key"] == "test-key"
+            assert env.plugin.store.epoch() == epoch
+
+    asyncio.run(run())
 
 
 @pytest.mark.parametrize(
@@ -449,7 +557,7 @@ def test_state_exposes_settings_and_safe_selector_labels_only(entry):
             ]
             result = await route(env.context, "state")()
             assert result.status_code == 200
-            assert len(result["config"]["schema"]) == 55
+            assert len(result["config"]["schema"]) == len(SCHEMA)
             assert result["choices"]["providers"] == [
                 {"id": "existing-model", "label": "existing-model"}
             ]

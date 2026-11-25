@@ -16,6 +16,7 @@ from pathlib import Path
 import aiohttp
 
 from . import simulation_bailian
+from .settings import BAILIAN_TRIAL_MODELS
 from .simulation_models import MODELS, ModelFiles
 
 MAX_ROUNDS = 6
@@ -187,6 +188,7 @@ class Simulation:
                         else f"阿里云百炼 · {code}"
                     ),
                     "unavailable_reason": reason,
+                    "group_trial_label": BAILIAN_TRIAL_MODELS.get(code, ""),
                 }
                 for code in sorted(settings.bailian_model_codes)
             )
