@@ -5,7 +5,7 @@
     <meta name="viewport" content="width=device-width, initial-scale=1" />
     <meta name="color-scheme" content="light dark" />
     <title>可可子 · 人格管理</title>
-    <link rel="stylesheet" href="./style.css?v=2.5.0" />
+    <link rel="stylesheet" href="./style.css?v=2.6.0" />
   </head>
   <body>
     <main class="shell" id="app" aria-busy="true">
@@ -69,8 +69,12 @@
         <article class="card sim-card">
           <div class="sim-toolbar">
             <div class="field grow"><label for="sim-model">模拟模型</label><select id="sim-model" disabled></select></div>
-            <button type="button" id="sim-clear" disabled>新对话</button>
+            <div class="item-actions">
+              <button type="button" id="sim-engine" disabled>加载模型</button>
+              <button type="button" id="sim-clear" disabled>新对话</button>
+            </div>
           </div>
+          <p id="sim-resident" class="small" role="status"></p>
           <p id="sim-model-note" class="field-hint"></p>
           <div id="sim-messages" class="sim-messages" aria-label="模拟消息"></div>
           <p id="sim-status" class="small muted" role="status" aria-live="polite"></p>
@@ -225,6 +229,6 @@
       <div id="memory-detail-fields"></div><p id="memory-detail-error" class="field-error" role="alert"></p>
       <div class="dialog-actions"><button id="memory-detail-cancel" type="button">取消</button><button type="submit" class="primary">保存修改</button></div>
     </form></dialog>
-    <script type="module" src="./app.js?v=2.5.0"></script>
+    <script type="module" src="./app.js?v=2.6.0"></script>
   </body>
 </html>

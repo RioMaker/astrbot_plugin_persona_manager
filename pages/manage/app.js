@@ -28,6 +28,10 @@ let simKey = "";
 let simTimer = null;
 let simWaiting = false;
 let simNotice = "";
+let simLoaded = null;
+let simOtherBusy = false;
+let simStateTimer = null;
+let simEpoch = 0;
 
 const array = (value) => (Array.isArray(value) ? value : []);
 const object = (value) => (value && typeof value === "object" && !Array.isArray(value) ? value : {});
@@ -205,7 +209,8 @@ async function loadState({ replaceCore = false } = {}) {
   selectedPersona = string(first(state.persona?.id, state.persona?.persona_id, selectedPersona));
   const simSelect = byId("sim-model");
   const models = array(state.simulation_models);
-  const model = simSelect.value;
+  simLoaded = state.simulation_loaded_model || null;
+  const model = simSelect.value || simLoaded;
   fillOptions(simSelect, Object.fromEntries(models.map((m) => [m.id, m.label])),
     models.some((m) => m.id === model) ? model : (models[0]?.id || ""));
   renderSim();
@@ -823,7 +828,7 @@ function renderOverview() {
   details.replaceChildren();
   const status = object(state.status);
   const capture = object(status.capture);
-  addMeta(details, "运行版本", `${status.runtime_version ? `v${status.runtime_version}` : "未知"} / 页面 v2.5.0`);
+  addMeta(details, "运行版本", `${status.runtime_version ? `v${status.runtime_version}` : "未知"} / 页面 v2.6.0`);
   addMeta(details, "已采集原文", countText(status.sources));
   addMeta(details, "待整理对话", countText(status.pending_interactions));
   addMeta(details, "生效记忆", countText(status.memories));
@@ -1247,26 +1252,33 @@ function simThread(model = byId("sim-model").value, persona = selectedPersona) {
 }
 
 function simControls() {
-  const blocked = busy || !ready || simWaiting || Boolean(simJob);
+  const blocked = busy || !ready || simWaiting || simOtherBusy || Boolean(simJob);
+  const model = byId("sim-model").value;
+  const local = Boolean(model) && model !== "configured";
   byId("sim-model").disabled = blocked;
-  byId("sim-input").disabled = blocked || !byId("sim-model").value;
+  const engineButton = byId("sim-engine");
+  engineButton.hidden = !local;
+  engineButton.disabled = blocked || !local;
+  engineButton.textContent = simLoaded ? "释放模型" : "加载模型";
+  engineButton.title = simLoaded ? `释放 ${simLoaded}` : `加载 ${model}`;
+  byId("sim-input").disabled = blocked || !model;
   byId("sim-send").disabled = byId("sim-input").disabled || !byId("sim-input").value.trim();
   byId("sim-clear").disabled = blocked || !simChats.get(simThread())?.length;
-  byId("sim-stop").hidden = !simJob?.id;
-  byId("sim-stop").disabled = !simJob?.id || simWaiting;
+  byId("sim-stop").hidden = !simJob?.id || simJob.operation === "unload";
+  byId("sim-stop").disabled = byId("sim-stop").hidden || simWaiting;
 }
 
 function renderSim() {
   const model = byId("sim-model").value;
   const key = simThread();
   byId("sim-model-note").textContent = model === "configured"
-    ? "试聊将调用「模型与预算」中已保存的自定义提供商。"
-    : "首次发送会下载所选的 Q4_K_M 权重，后续试聊复用本机缓存。";
+    ? "自定义模型的加载和释放由其提供商管理。"
+    : "可提前加载，也可直接发送。首次加载会下载权重，切换时先释放已驻留的模型。";
   const list = byId("sim-messages");
   const atEnd = list.scrollHeight - list.scrollTop - list.clientHeight < 48;
   list.replaceChildren();
   const turns = [...(simChats.get(key) || [])];
-  if (simJob && simKey === key) {
+  if (simJob && (simJob.operation || "send") === "send" && simKey === key) {
     turns.push({role: "user", content: simJob.question});
     if (simJob.answer) turns.push({role: "assistant", content: simJob.answer});
   }
@@ -1277,27 +1289,42 @@ function renderSim() {
     list.append(row);
   }
   if (atEnd) list.scrollTop = list.scrollHeight;
-  byId("sim-status").textContent = simJob?.detail || simNotice;
+  renderSimStatus();
+}
+
+function renderSimStatus() {
+  const residency = (simLoaded ? `当前驻留模型：${simLoaded}` : "当前没有已加载的本地模型")
+    + (simOtherBusy ? " · 另一个页面正在使用模拟引擎" : "");
+  const detail = simJob?.detail || simNotice;
+  if (byId("sim-resident").textContent !== residency) byId("sim-resident").textContent = residency;
+  if (byId("sim-status").textContent !== detail) byId("sim-status").textContent = detail;
   simControls();
+  window.clearTimeout(simStateTimer);
+  if (ready && !simWaiting && !simJob && !byId("panel-simulation").hidden) {
+    simStateTimer = window.setTimeout(() => recoverSim(), 5000);
+  }
 }
 
 function acceptSim(job) {
   if (!job?.id || !["running", "done", "cancelled", "error"].includes(job.status)) throw new Error("模拟接口返回了无效状态，请重载插件。");
   simJob = job;
+  if ("loaded_model" in job) simLoaded = job.loaded_model;
+  const isChat = (job.operation || "send") === "send";
   if (job.status === "running") {
     if (simTimer !== null) window.clearTimeout(simTimer);
-    simTimer = window.setTimeout(() => pollSim(job.id), 900);
+    const pollDelay = isChat && simLoaded === job.model ? 300 : 900;
+    simTimer = window.setTimeout(() => pollSim(job.id), pollDelay);
   } else {
     if (simTimer !== null) window.clearTimeout(simTimer);
     simTimer = null;
-    if (job.status === "done" && job.answer?.trim()) {
+    if (isChat && job.status === "done" && job.answer?.trim()) {
       const turns = simChats.get(simKey) || [];
       turns.push({role: "user", content: job.question}, {role: "assistant", content: job.answer.trim()});
       simChats.set(simKey, turns.slice(-60));
       simNotice = `已使用${job.prompt_source}，本轮由 ${job.model === "configured" ? "自定义模型" : job.model} 回复。`;
     } else {
-      if (simKey === simThread()) byId("sim-input").value = job.question;
-      simNotice = job.detail || "模型没有返回正文。";
+      if (isChat && simKey === simThread()) byId("sim-input").value = job.question;
+      simNotice = job.detail || "操作结束";
     }
     simJob = null;
   }
@@ -1322,19 +1349,46 @@ async function pollSim(id) {
   }
 }
 
-async function recoverSim() {
+async function recoverSim(resume = false) {
   if (!ready || simWaiting || simJob) return;
-  simWaiting = true;
-  simControls();
+  const epoch = ++simEpoch;
   try {
-    const {job} = await bridge.apiPost("simulation", {action: "active"});
-    if (job) {
+    const {job, loaded_model, busy: occupied} = await bridge.apiPost("simulation", {action: "active"});
+    if (epoch !== simEpoch) return;
+    simLoaded = loaded_model || null;
+    simOtherBusy = Boolean(occupied);
+    if (resume && job) {
+      simOtherBusy = false;
       byId("sim-model").value = job.model;
       simKey = simThread(job.model, job.persona);
       acceptSim(job);
+    } else if (resume && simLoaded) {
+      byId("sim-model").value = simLoaded;
     }
   } catch (error) {
-    simNotice = error?.message || "获取模拟状态失败。";
+    if (epoch === simEpoch) simNotice = error?.message || "获取模拟状态失败。";
+  } finally {
+    if (epoch === simEpoch) {
+      if (resume) renderSim();
+      else renderSimStatus();
+    }
+  }
+}
+
+async function manageSim(action) {
+  const model = action === "unload" ? simLoaded : byId("sim-model").value;
+  if (!ready || busy || simWaiting || simJob || simOtherBusy || !model) return;
+  ++simEpoch;
+  simWaiting = true;
+  simNotice = "";
+  renderSim();
+  try {
+    const status = await bridge.apiPost("simulation", {action, model});
+    simLoaded = status.loaded_model || null;
+    simOtherBusy = Boolean(status.busy && !status.job);
+    if (status.job) acceptSim(status.job);
+  } catch (error) {
+    simNotice = error?.message || "模型操作失败，请重试。";
   } finally {
     simWaiting = false;
     renderSim();
@@ -1345,7 +1399,8 @@ byId("sim-form").addEventListener("submit", async (event) => {
   event.preventDefault();
   const input = byId("sim-input");
   const message = input.value.trim(), model = byId("sim-model").value;
-  if (!ready || busy || simJob || simWaiting || !message || !model) return;
+  if (!ready || busy || simJob || simWaiting || simOtherBusy || !message || !model) return;
+  ++simEpoch;
   simKey = simThread();
   const history = (simChats.get(simKey) || []).slice(-12);
   simJob = {model, question: message, detail: "正在提交…"};
@@ -1365,7 +1420,8 @@ byId("sim-form").addEventListener("submit", async (event) => {
   }
 });
 byId("sim-input").addEventListener("input", simControls);
-byId("sim-model").addEventListener("change", () => { simNotice = ""; renderSim(); });
+byId("sim-model").addEventListener("change", () => manageSim("select"));
+byId("sim-engine").addEventListener("click", () => manageSim(simLoaded ? "unload" : "load"));
 byId("sim-clear").addEventListener("click", () => {
   if (simJob || simWaiting) return;
   simChats.delete(simThread());
@@ -1396,7 +1452,8 @@ function showPanel(name) {
     if (active) tab.setAttribute("aria-current", "page"); else tab.removeAttribute("aria-current");
     byId(`panel-${tab.dataset.panel}`).hidden = !active;
   });
-  if (name === "simulation") void recoverSim();
+  if (name === "simulation") void recoverSim(true);
+  else window.clearTimeout(simStateTimer);
 }
 
 document.querySelectorAll("[data-panel]").forEach((button) => {

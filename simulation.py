@@ -1,12 +1,13 @@
-"""Short-lived, authenticated Dashboard chat jobs, isolated from QQ and learning."""
+"""Authenticated Dashboard chats sharing one resident local inference process."""
 
 import asyncio
 import json
 import os
 import secrets
+import sys
 import tempfile
 import time
-from contextlib import asynccontextmanager
+from contextlib import AsyncExitStack, asynccontextmanager
 from dataclasses import dataclass, field
 from pathlib import Path
 
@@ -52,9 +53,10 @@ def chat_messages(payload):
 class Job:
     owner: str
     model: str
-    question: str
-    persona: str
-    prompt_source: str
+    question: str = ""
+    persona: str = ""
+    prompt_source: str = ""
+    operation: str = "send"
     id: str = field(default_factory=lambda: secrets.token_hex(16))
     status: str = "running"
     detail: str = "准备模拟对话"
@@ -65,10 +67,12 @@ class Job:
     def progress(self, detail):
         self.detail = detail
 
-    def view(self):
+    def view(self, loaded_model):
         return {
             "id": self.id,
             "model": self.model,
+            "operation": self.operation,
+            "loaded_model": loaded_model,
             "persona": self.persona,
             "question": self.question,
             "prompt_source": self.prompt_source,
@@ -78,6 +82,14 @@ class Job:
         }
 
 
+@dataclass
+class ResidentEngine:
+    model: str
+    process: asyncio.subprocess.Process
+    client: aiohttp.ClientSession
+    resources: AsyncExitStack
+
+
 class Simulation:
     def __init__(self, directory, context):
         self.files = ModelFiles(directory)
@@ -85,7 +97,22 @@ class Simulation:
         self.jobs = {}
         self.active = None
         self.task = None
-        self.closed = False
+        self._closing = None
+        self.engine: ResidentEngine | None = None
+
+    @property
+    def loaded_model(self):
+        if self.engine and self.engine.process.returncode is None:
+            return self.engine.model
+        return None
+
+    def state(self, owner):
+        job = self.active
+        return {
+            "job": job.view(self.loaded_model) if job and job.owner == owner else None,
+            "busy": job is not None,
+            "loaded_model": self.loaded_model,
+        }
 
     def models(self, provider):
         choices = [
@@ -106,23 +133,87 @@ class Simulation:
             raise ValueError("模拟任务已过期或不存在")
         return job
 
-    def start(self, owner, model, messages, persona, system, source, provider):
-        if model not in MODELS and not (model == CONFIGURED and provider):
+    def _check_available(self, model, provider):
+        if not isinstance(model, str) or (
+            model not in MODELS and not (model == CONFIGURED and provider)
+        ):
             raise ValueError("请选择可用的模拟模型")
-        if self.closed or self.active is not None:
+        if self._closing is not None or self.active is not None:
             raise SimulationBusy("模拟引擎正在处理另一个请求，请稍后重试")
+
+    def start(self, owner, model, messages, persona, system, source, provider):
+        self._check_available(model, provider)
+        job = Job(owner, model, messages[-1]["content"], persona, source)
+        self._submit(job, messages, system, provider)
+        return job.view(self.loaded_model)
+
+    def manage(self, owner, action, model, provider):
+        self._check_available(model, provider)
+        loaded = self.loaded_model
+        if action == "select":
+            if not loaded or loaded == model:
+                return
+            action = "unload" if model == CONFIGURED else "load"
+        elif model == CONFIGURED:
+            raise ValueError("自定义模型的加载和释放由其提供商管理")
+        elif action == "unload" and loaded and loaded != model:
+            raise SimulationBusy("驻留模型已变更，请核对当前模型后再释放")
+
+        if (action == "load" and loaded == model) or (
+            action == "unload" and self.engine is None
+        ):
+            return
+        detail = "准备释放本地模型" if action == "unload" else f"准备加载 {model}"
+        self._submit(Job(owner, model, operation=action, detail=detail))
+
+    def _submit(self, job, messages=(), system="", provider=""):
         now = time.monotonic()
         self.jobs = {k: v for k, v in self.jobs.items() if now - v.finished < 900}
         while len(self.jobs) >= 8:
             self.jobs.pop(next(iter(self.jobs)))
-        job = Job(owner, model, messages[-1]["content"], persona, source)
         self.jobs[job.id] = self.active = job
         self.task = asyncio.create_task(self._run(job, messages, system, provider))
-        return job.view()
+        self.task.add_done_callback(lambda task: self._finished(job, task))
+
+    def _finished(self, job, task):
+        # Cancellation before _run's first instruction must also release the slot.
+        if task.cancelled():
+            job.status, job.detail = "cancelled", "已停止"
+        job.finished = time.monotonic()
+        self.active = None
+
+    async def _load(self, job):
+        if self.loaded_model == job.model:
+            return self.engine
+        await self._release(job)
+        binary, weights = await self.files.prepare(job.model, job.progress)
+        job.progress(f"正在加载 {job.model}")
+        self.engine = await _open_engine(job.model, binary, weights)
+        return self.engine
+
+    async def _release(self, job=None):
+        engine = self.engine
+        if engine is None:
+            return
+        if job:
+            job.progress(f"正在释放 {engine.model}")
+        # Finish reaping the old process before another load can claim this slot.
+        closing = asyncio.create_task(engine.resources.aclose())
+        try:
+            await asyncio.shield(closing)
+        except asyncio.CancelledError:
+            await closing
+            raise
+        finally:
+            self.engine = None
 
     async def _run(self, job, messages, system, provider):
         try:
-            if job.model == CONFIGURED:
+            if job.operation == "unload":
+                await self._release(job)
+                job.detail = "本地模型已释放"
+            elif job.model == CONFIGURED:
+                await self._release(job)
                 job.progress("自定义模型正在回复")
                 result = await asyncio.wait_for(
                     self.context.llm_generate(
@@ -137,18 +228,28 @@ class Simulation:
                 )
                 job.answer = (getattr(result, "completion_text", "") or "").strip()
             else:
-                binary, weights = await self.files.prepare(job.model, job.progress)
-                await _native_reply(binary, weights, system, messages, job)
-            if not job.answer.strip():
-                raise ValueError("模型没有返回正文，请重试")
-            job.status, job.detail = "done", "回复完成"
+                engine = await self._load(job)
+                if job.operation == "load":
+                    job.detail = f"{job.model} 已加载，可以试聊"
+                else:
+                    job.progress(f"{job.model} 正在回复")
+                    try:
+                        await _stream(engine.client, system, messages, job)
+                    except (aiohttp.ClientConnectionError, asyncio.TimeoutError):
+                        await self._release()
+                        raise
+            if job.operation == "send":
+                if not job.answer.strip():
+                    raise ValueError("模型没有返回正文，请重试")
+                job.detail = "回复完成"
+            job.status = "done"
         except asyncio.CancelledError:
             job.status, job.detail = "cancelled", "已停止"
         except ValueError as exc:
             job.status, job.detail = (
                 "error",
                 str(exc)
-                if job.model != CONFIGURED
+                if job.model != CONFIGURED or job.operation != "send"
                 else "自定义模型调用失败，请检查已配置提供商的连接和模型名",
             )
         except Exception as exc:
@@ -156,9 +257,6 @@ class Simulation:
                 "error",
                 f"模拟调用失败（{type(exc).__name__}），请检查模型服务、磁盘余量或网络后重试",
             )
-        finally:
-            job.finished = time.monotonic()
-            self.active = None
 
     async def stop(self):
         task, job = self.task, self.active
@@ -168,80 +266,87 @@ class Simulation:
                 job.detail = "正在停止"
                 task.cancel()
             await asyncio.shield(asyncio.gather(task, return_exceptions=True))
-            # Cancellation can arrive before the coroutine's first instruction.
-            if self.active is job:
-                job.status, job.detail, job.finished = (
-                    "cancelled",
-                    "已停止",
-                    time.monotonic(),
-                )
-                self.active = None
 
     async def close(self):
-        self.closed = True
+        if self._closing is None:
+            self._closing = asyncio.create_task(self._shutdown())
+        await asyncio.shield(self._closing)
+
+    async def _shutdown(self):
         await self.stop()
+        await self._release()
         self.jobs.clear()
 
 
-async def _native_reply(binary, weights, system, messages, job):
-    job.progress(f"加载 {job.model}")
-    with tempfile.TemporaryDirectory(prefix="persona-sim-") as run_dir:
+async def _open_engine(model, binary, weights):
+    binary, weights = binary.resolve(), weights.resolve()
+    async with AsyncExitStack() as resources:
+        run_dir = resources.enter_context(
+            tempfile.TemporaryDirectory(prefix="persona-sim-")
+        )
         socket = Path(run_dir) / "chat.sock"
         lib_path = os.pathsep.join(
             filter(None, (str(binary.parent), os.environ.get("LD_LIBRARY_PATH")))
         )
-        async with _engine_process(
-            str(binary),
-            "--model",
-            str(weights),
-            "--host",
-            str(socket),
-            "--threads",
-            "2",
-            "--threads-batch",
-            "2",
-            "--ctx-size",
-            "4096",
-            "--parallel",
-            "1",
-            "--cache-ram",
-            "0",
-            "--n-predict",
-            str(MAX_OUTPUT),
-            "--no-webui",
-            "--no-warmup",
-            "--log-disable",
-            "--jinja",
-            "--chat-template-kwargs",
-            '{"enable_thinking":false}',
-            env={**os.environ, "LD_LIBRARY_PATH": lib_path},
-            cwd=binary.parent,
-            stdout=asyncio.subprocess.DEVNULL,
-            stderr=asyncio.subprocess.DEVNULL,
-        ) as proc:
-            async with aiohttp.ClientSession(
+        proc = await resources.enter_async_context(
+            _engine_process(
+                sys.executable,
+                "-I",
+                str(Path(__file__).with_name("simulation_exec.py").resolve()),
+                str(os.getpid()),
+                str(binary),
+                "--model",
+                str(weights),
+                "--host",
+                str(socket),
+                "--threads",
+                "2",
+                "--threads-batch",
+                "2",
+                "--ctx-size",
+                "4096",
+                "--parallel",
+                "1",
+                "--sleep-idle-seconds",
+                "-1",
+                "--cache-ram",
+                "0",
+                "--n-predict",
+                str(MAX_OUTPUT),
+                "--no-webui",
+                "--no-warmup",
+                "--log-disable",
+                "--jinja",
+                "--chat-template-kwargs",
+                '{"enable_thinking":false}',
+                env={**os.environ, "LD_LIBRARY_PATH": lib_path},
+                cwd=binary.parent,
+                stdout=asyncio.subprocess.DEVNULL,
+                stderr=asyncio.subprocess.DEVNULL,
+            )
+        )
+        client = await resources.enter_async_context(
+            aiohttp.ClientSession(
                 connector=aiohttp.UnixConnector(path=str(socket)),
                 timeout=aiohttp.ClientTimeout(total=360),
-            ) as client:
-                deadline = time.monotonic() + 150
-                while time.monotonic() < deadline:
-                    if proc.returncode is not None:
-                        raise ValueError(
-                            f"CPU 引擎启动失败（退出码 {proc.returncode}），请检查可用内存及系统是否支持运行 Linux x86_64 程序"
-                        )
-                    try:
-                        async with client.get(
-                            "http://localhost/health", timeout=2
-                        ) as check:
-                            if check.status == 200:
-                                break
-                    except (aiohttp.ClientError, asyncio.TimeoutError):
-                        pass
-                    await asyncio.sleep(0.3)
-                else:
-                    raise ValueError("加载模型超时，请检查服务器内存及 CPU 占用")
-                job.progress(f"{job.model} 正在回复")
-                await _stream(client, system, messages, job)
+            )
+        )
+        deadline = time.monotonic() + 300
+        while time.monotonic() < deadline:
+            if proc.returncode is not None:
+                raise ValueError(
+                    f"CPU 引擎启动失败（退出码 {proc.returncode}），请检查可用内存及系统是否支持运行 Linux x86_64 程序"
+                )
+            try:
+                async with client.get("http://localhost/health", timeout=2) as check:
+                    if check.status == 200:
+                        break
+            except (aiohttp.ClientError, asyncio.TimeoutError):
+                pass
+            await asyncio.sleep(0.3)
+        else:
+            raise ValueError("加载模型超时，请检查服务器内存及 CPU 占用")
+        return ResidentEngine(model, proc, client, resources.pop_all())
 
 
 @asynccontextmanager
@@ -260,7 +365,10 @@ async def _engine_process(*args, **kwargs):
         try:
             await asyncio.wait_for(proc.wait(), 5)
         except asyncio.TimeoutError:
-            proc.kill()
+            try:
+                proc.kill()
+            except ProcessLookupError:
+                pass
             await proc.wait()
 
 

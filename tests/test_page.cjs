@@ -73,23 +73,94 @@ function page(options = {}) {
 
 const flush = () => new Promise((resolve) => setImmediate(resolve));
 
+function simulateModels() {
+  let loaded = null;
+  let sequence = 0;
+  return ({action, model, message}) => {
+    if (action === "active" || (action === "select" && !loaded)) {
+      return {job: null, loaded_model: loaded, busy: false};
+    }
+    const unload = action === "unload" || model === "configured";
+    loaded = unload ? null : model;
+    const job = {id: String(++sequence), status: "done", model, loaded_model: loaded};
+    if (action === "send") {
+      return {...job, operation: "send", question: message, answer: "收到", prompt_source: "已保存的人格"};
+    }
+    return {
+      job: {...job, operation: unload ? "unload" : "load", detail: unload ? "模型已释放" : "模型已加载"},
+      loaded_model: loaded, busy: false,
+    };
+  };
+}
+
 test("simulation keeps independent multi-turn chats when switching between 2B and 8B", async () => {
-  const ui = page({simulation: p => ({id: "job", status: "done", model: p.model, question: p.message, answer: "收到", prompt_source: "已保存的人格"})});
+  const ui = page({simulation: simulateModels()});
   await flush();
   const el = id => ui.elements.get(id);
-  const select = name => { el("sim-model").value = name; el("sim-model").handlers.change(); };
+  const select = async name => {
+    el("sim-model").value = name;
+    await el("sim-model").handlers.change();
+  };
   const send = async message => { el("sim-input").value = message; await el("sim-form").handlers.submit({preventDefault(){}}); };
   assert.equal(el("sim-model").value, "Qwen3.5-2B");
   await send("小模型第一轮");
-  select("Qwen3-8B"); await send("大模型第一轮");
-  assert.deepEqual(ui.posts[1].payload.history, []);
-  select("Qwen3.5-2B"); await send("继续刚才的话");
-  assert.deepEqual(ui.posts[2].payload.history, [{role:"user",content:"小模型第一轮"},{role:"assistant",content:"收到"}]);
+  await select("Qwen3-8B");
+  await send("大模型第一轮");
+  await select("Qwen3.5-2B");
+  await send("继续刚才的话");
+  const chats = ui.posts.filter(p => p.payload.action === "send");
+  assert.deepEqual(chats[1].payload.history, []);
+  assert.deepEqual(chats[2].payload.history, [{role:"user",content:"小模型第一轮"},{role:"assistant",content:"收到"}]);
   el("sim-clear").handlers.click();
   assert.doesNotMatch(textOf(el("sim-messages")), /继续刚才/);
-  select("Qwen3-8B");
+  await select("Qwen3-8B");
   assert.match(textOf(el("sim-messages")), /大模型第一轮/);
   assert.ok(ui.posts.every(p => p.endpoint === "simulation"));
+});
+
+test("manual load and release update residency without changing the draft or chat", async () => {
+  const ui = page({simulation: simulateModels()});
+  await flush();
+  const el = id => ui.elements.get(id);
+  el("sim-input").value = "还没发送的草稿";
+  const engineButton = el("sim-engine");
+  assert.equal(engineButton.disabled, false);
+  assert.equal(engineButton.textContent, "加载模型");
+  await engineButton.handlers.click();
+  assert.equal(el("sim-input").value, "还没发送的草稿");
+  assert.match(el("sim-resident").textContent, /Qwen3\.5-2B/);
+  assert.equal(engineButton.textContent, "释放模型");
+  assert.match(textOf(el("sim-messages")), /第一条消息/);
+  await el("sim-form").handlers.submit({preventDefault() {}});
+  await engineButton.handlers.click();
+  assert.match(el("sim-resident").textContent, /没有已加载/);
+  assert.match(textOf(el("sim-messages")), /还没发送的草稿/);
+  assert.equal(engineButton.textContent, "加载模型");
+  el("sim-model").value = "configured";
+  await el("sim-model").handlers.change();
+  assert.equal(engineButton.hidden, true);
+});
+
+test("an old status response cannot undo a manual load and a foreign job locks the controls", async () => {
+  const simulate = simulateModels();
+  let releaseStatus;
+  let active = () => new Promise(resolve => { releaseStatus = resolve; });
+  const ui = page({simulation: payload => payload.action === "active" ? active() : simulate(payload)});
+  await flush();
+  const el = id => ui.elements.get(id);
+  const pending = vm.runInContext("recoverSim()", ui.sandbox);
+  await el("sim-engine").handlers.click();
+  releaseStatus({loaded_model: null, job: null, busy: false});
+  await pending;
+  assert.match(el("sim-resident").textContent, /Qwen3\.5-2B/);
+  active = () => ({loaded_model: "Qwen3-8B", job: null, busy: true});
+  await vm.runInContext("recoverSim(true)", ui.sandbox);
+  assert.equal(el("sim-model").value, "Qwen3-8B");
+  assert.equal(el("sim-engine").disabled, true);
+  assert.match(el("sim-resident").textContent, /另一个页面/);
+  active = () => ({loaded_model: "Qwen3-8B", job: null, busy: false});
+  await vm.runInContext("recoverSim()", ui.sandbox);
+  assert.equal(el("sim-engine").disabled, false);
 });
 
 test("simulation shows preparation progress, blocks duplicates and restores cancelled input", async () => {
@@ -577,7 +648,7 @@ test("overview separates captured dialogue, pending extraction and stored memory
   ui.view.schedule = { state: "budget", reason: "预计 20009 tokens，单次上限 20000 tokens", groups: [] };
   await vm.runInContext("loadState()", ui.sandbox);
   const detail = textOf(ui.elements.get("schedule-details"));
-  assert.match(detail, /运行版本：v2\.2\.1 \/ 页面 v2\.5\.0/);
+  assert.match(detail, /运行版本：v2\.2\.1 \/ 页面 v2\.6\.0/);
   assert.match(detail, /已采集原文：24/);
   assert.match(detail, /待整理对话：20/);
   assert.match(detail, /生效记忆：0/);
@@ -616,7 +687,7 @@ test("empty learning calls explain zero capture, paused and disabled learning wi
 test("legacy overview diagnostics remain unknown and translate active scheduler states", async () => {
   const ui = page(); await flush();
   const detail = textOf(ui.elements.get("schedule-details"));
-  assert.match(detail, /运行版本：未知 \/ 页面 v2\.5\.0/);
+  assert.match(detail, /运行版本：未知 \/ 页面 v2\.6\.0/);
   assert.match(detail, /已采集原文：—/);
   assert.match(detail, /待整理对话：—/);
   assert.match(detail, /待确认记忆：—/);

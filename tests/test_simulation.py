@@ -1,5 +1,10 @@
 import asyncio
 import hashlib
+import select
+import subprocess
+import sys
+from contextlib import AsyncExitStack
+from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import AsyncMock, Mock
 
@@ -9,6 +14,50 @@ from aiohttp import web
 from astrbot_plugin_persona_manager import simulation
 from astrbot_plugin_persona_manager.simulation_models import Asset, ModelFiles
 from astrbot_plugin_persona_manager.tests.test_integration import entry as entry
+
+
+@pytest.mark.skipif(sys.platform != "linux", reason="内置引擎使用 Linux 进程生命周期")
+def test_resident_launcher_exits_if_the_host_is_killed():
+    launcher = Path(simulation.__file__).with_name("simulation_exec.py")
+    owner_program = """
+import os, subprocess, sys
+child = "import sys; print('ready', flush=True); sys.stdin.buffer.read()"
+subprocess.run([sys.executable, "-I", sys.argv[1], str(os.getpid()), sys.executable, "-c", child], check=True)
+"""
+    with subprocess.Popen(
+        [sys.executable, "-c", owner_program, str(launcher)],
+        stdin=subprocess.PIPE,
+        stdout=subprocess.PIPE,
+    ) as owner:
+        try:
+            assert select.select([owner.stdout], [], [], 5)[0]
+            assert owner.stdout.readline() == b"ready\n"
+            owner.kill()
+            owner.wait(timeout=5)
+            # Only the resident child still owns the write side after its parent dies.
+            assert select.select([owner.stdout], [], [], 5)[0]
+            assert owner.stdout.read(1) == b""
+        finally:
+            owner.stdin.close()
+            if owner.poll() is None:
+                owner.kill()
+
+
+@pytest.fixture
+def native_engines(monkeypatch):
+    engines = []
+
+    async def open_engine(model, binary, weights):
+        assert all(engine.process.returncode is not None for engine in engines)
+        process = SimpleNamespace(returncode=None)
+        stack = AsyncExitStack()
+        stack.callback(setattr, process, "returncode", 0)
+        engine = simulation.ResidentEngine(model, process, object(), stack)
+        engines.append(engine)
+        return engine
+
+    monkeypatch.setattr(simulation, "_open_engine", open_engine)
+    return engines
 
 
 def test_cancelling_while_the_native_engine_starts_reaps_the_child(monkeypatch):
@@ -39,7 +88,9 @@ def test_cancelling_while_the_native_engine_starts_reaps_the_child(monkeypatch):
     asyncio.run(run())
 
 
-def test_simulation_access_isolation_switching_and_history(entry, monkeypatch):
+def test_simulation_access_isolation_switching_and_history(
+    entry, monkeypatch, native_engines
+):
     async def run():
         async with entry.running({"local_chat_provider_id": "my-tuned-model"}) as env:
             plugin = env.plugin
@@ -53,16 +104,18 @@ def test_simulation_access_isolation_switching_and_history(entry, monkeypatch):
             barrier = asyncio.Event()
             captures = []
 
-            async def fake_reply(binary, weights, core, messages, job):
+            async def fake_reply(client, core, messages, job):
                 captures.append((job.model, messages, core))
                 await barrier.wait()
                 job.answer = "试聊回复"
 
-            monkeypatch.setattr(simulation, "_native_reply", fake_reply)
+            monkeypatch.setattr(simulation, "_stream", fake_reply)
             plugin.simulation.files.prepare = AsyncMock(
                 return_value=("engine", "weights")
             )
             env.request.username = None
+            for action in ("active", "load", "unload", "select"):
+                assert (await api(action=action, model="Qwen3-8B")).status_code == 403
             assert (
                 await api(action="send", model="Qwen3-8B", message="测试")
             ).status_code == 403
@@ -82,7 +135,9 @@ def test_simulation_access_isolation_switching_and_history(entry, monkeypatch):
                     await api(action="send", model=model, message="重复")
                 ).status_code == 409
                 env.request.username = "B"
-                assert (await api(action="active"))["job"] is None
+                foreign = await api(action="active")
+                assert foreign["job"] is None and foreign["busy"]
+                assert (await api(action="unload", model=model)).status_code == 409
                 assert (await api(action="cancel", id=started["id"])).status_code == 404
                 assert (await api(action="poll", id=started["id"])).status_code == 404
                 env.request.username = "A"
@@ -90,6 +145,7 @@ def test_simulation_access_isolation_switching_and_history(entry, monkeypatch):
                 await plugin.simulation.task
                 result = await api(action="poll", id=started["id"])
                 assert result["answer"] == "试聊回复" and result["status"] == "done"
+                assert result["loaded_model"] == model
                 assert captures[-1][:2] == (
                     model,
                     [*history, {"role": "user", "content": "继续"}],
@@ -108,8 +164,129 @@ def test_simulation_access_isolation_switching_and_history(entry, monkeypatch):
             assert args["chat_provider_id"] == "my-tuned-model"
             assert args["contexts"] == history and args["tools"] is None
             assert args["system_prompt"] == captures[0][2]
+            assert plugin.simulation.loaded_model is None
+            assert all(engine.process.returncode == 0 for engine in native_engines)
             env.context.send_message.assert_not_called()
             assert plugin.store.pending_sources() == []
+
+    asyncio.run(run())
+
+
+def test_manual_load_release_and_warm_messages(entry, monkeypatch, native_engines):
+    small, large = simulation.MODELS
+
+    async def run():
+        async with entry.running({"local_chat_provider_id": "custom"}) as env:
+            sim = env.plugin.simulation
+            sim.files.prepare = AsyncMock(return_value=("engine", "weights"))
+
+            async def reply(client, system, messages, job):
+                assert client is native_engines[-1].client
+                job.answer = "收到"
+
+            monkeypatch.setattr(simulation, "_stream", reply)
+
+            async def api(action, **data):
+                env.request.payload = dict(action=action, **data)
+                return await env.plugin.page_simulation()
+
+            async def finish(job):
+                await sim.task
+                result = await api("poll", id=job["id"])
+                assert result["status"] == "done"
+                return result
+
+            assert (await api("select", model=large))["job"] is None
+            assert (await api("load", model="configured")).status_code == 400
+            loaded = await finish((await api("load", model=small))["job"])
+            assert loaded["loaded_model"] == small and loaded["operation"] == "load"
+            assert loaded["answer"] == "" and loaded["question"] == ""
+            assert (await env.plugin.page_state())["simulation_loaded_model"] == small
+            assert (await api("load", model=small))["job"] is None
+            for question in ("你好", "再聊一句"):
+                chat = await finish(await api("send", model=small, message=question))
+                assert chat["answer"] == "收到" and chat["loaded_model"] == small
+            assert len(native_engines) == 1 and sim.files.prepare.await_count == 1
+
+            switched = await finish((await api("select", model=large))["job"])
+            assert (
+                switched["loaded_model"] == large
+                and native_engines[0].process.returncode == 0
+            )
+            assert (await api("unload", model=small)).status_code == 409
+            assert sim.loaded_model == large
+            released = await finish((await api("unload", model=large))["job"])
+            assert released["loaded_model"] is None
+            assert (await api("unload", model=large))["job"] is None
+            await finish(await api("send", model=large, message="再加载"))
+            assert len(native_engines) == 3
+
+            native_engines[-1].process.returncode = 9
+            assert (await api("active"))["loaded_model"] is None
+            await finish(await api("send", model=large, message="恢复"))
+            assert len(native_engines) == 4 and sim.loaded_model == large
+            await finish((await api("select", model="configured"))["job"])
+            assert sim.loaded_model is None
+            await finish((await api("load", model=small))["job"])
+        assert native_engines[-1].process.returncode == 0
+
+    asyncio.run(run())
+
+
+def test_cancel_reply_keeps_engine_and_cancel_switch_finishes_release(
+    entry, monkeypatch, native_engines
+):
+    small, large = simulation.MODELS
+
+    async def run():
+        async with entry.running() as env:
+            sim = env.plugin.simulation
+            sim.files.prepare = AsyncMock(return_value=("engine", "weights"))
+            generating, releasing, allow_release = (
+                asyncio.Event(),
+                asyncio.Event(),
+                asyncio.Event(),
+            )
+
+            async def long_reply(*args):
+                generating.set()
+                await asyncio.Event().wait()
+
+            monkeypatch.setattr(simulation, "_stream", long_reply)
+            msg = [{"role": "user", "content": "长回复"}]
+            chat = sim.start(
+                "admin", small, msg, "可可子", "人设", "已保存的人格", None
+            )
+            await generating.wait()
+            await sim.stop()
+            assert sim.find("admin", chat["id"]).status == "cancelled"
+            assert sim.loaded_model == small
+
+            async def wait_for_release():
+                releasing.set()
+                await allow_release.wait()
+
+            native_engines[-1].resources.push_async_callback(wait_for_release)
+            sim.manage("admin", "select", large, None)
+            await releasing.wait()
+            stopping = asyncio.create_task(sim.stop())
+            await asyncio.sleep(0)
+            with pytest.raises(simulation.SimulationBusy):
+                sim.manage("other", "load", small, None)
+            allow_release.set()
+            await stopping
+            assert sim.loaded_model is None and len(native_engines) == 1
+
+            sim.manage("admin", "load", small, None)
+            await sim.task
+            sim.files.prepare.side_effect = ValueError("磁盘空间不足")
+            sim.manage("admin", "select", large, None)
+            failed = sim.active
+            await sim.task
+            assert failed.status == "error" and "磁盘" in failed.detail
+            assert (
+                sim.loaded_model is None and native_engines[-1].process.returncode == 0
+            )
 
     asyncio.run(run())
 

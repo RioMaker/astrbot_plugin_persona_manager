@@ -33,7 +33,7 @@ from .storage import Store
 from .temporal import BEIJING
 
 PLUGIN_NAME = "astrbot_plugin_persona_manager"
-PLUGIN_VERSION = "2.5.0"
+PLUGIN_VERSION = "2.6.0"
 GATE_NAME = "astrbot_plugin_access_gate"
 PENDING_KEY = PLUGIN_NAME + ":interaction"
 SENT_KEY = PLUGIN_NAME + ":sent"
@@ -887,6 +887,7 @@ class PersonaManagerPlugin(Star):
                     "simulation_models": self.simulation.models(
                         self.settings().local_chat_provider_id
                     ),
+                    "simulation_loaded_model": self.simulation.loaded_model,
                     "groups": await self.runtime.db("known_groups"),
                     "choices": await self._page_choices(),
                     "usage": usage_for_page(usage, self.settings()),
@@ -976,10 +977,15 @@ class PersonaManagerPlugin(Star):
         try:
             action = payload.get("action")
             if action == "active":
-                job = self.simulation.active
-                return json_response(
-                    {"job": job.view() if job and job.owner == owner else None}
+                return json_response(self.simulation.state(owner))
+            if action in ("load", "unload", "select"):
+                self.simulation.manage(
+                    owner,
+                    action,
+                    payload.get("model"),
+                    self.settings().local_chat_provider_id,
                 )
+                return json_response(self.simulation.state(owner))
             if action in ("poll", "cancel"):
                 try:
                     job = self.simulation.find(owner, payload.get("id"))
@@ -987,7 +993,7 @@ class PersonaManagerPlugin(Star):
                     return error_response(str(exc), status_code=404)
                 if action == "cancel" and self.simulation.active is job:
                     await self.simulation.stop()
-                return json_response(job.view())
+                return json_response(job.view(self.simulation.loaded_model))
             if action != "send":
                 raise ValueError("未知的模拟操作")
             persona_id = self._page_persona(payload.get("persona_id"))
